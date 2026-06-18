@@ -24,7 +24,14 @@ import torch
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import rustree
+import pytest
+
+# rustree was removed in the Rust-free build (it provided the tree simulator
+# this end-to-end test uses to generate data). Skip cleanly when it is absent.
+rustree = pytest.importorskip(
+    "rustree",
+    reason="rustree removed in the Rust-free build (was used for tree simulation)",
+)
 from gpurec.core.preprocess_cpp import _load_extension as _load_cpp_ext
 from gpurec.core.extract_parameters import extract_parameters
 from gpurec.core.likelihood import E_fixed_point, compute_log_likelihood

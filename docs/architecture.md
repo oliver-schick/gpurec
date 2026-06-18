@@ -7,7 +7,7 @@
 | **Product runtime** | `gpurec/` | Installable package. Everything needed for `pip install -e .` and the `gpurec` CLI. |
 | **Validation** | `tests/` | Pytest suite: `unit/`, `integration/`, `gradients/`, `kernels/`, `cli/`. |
 | **Research** | `experiments/` | Standalone debug/investigation scripts. Import from `gpurec.*`. Not packaged. |
-| **External** | `logmatmul/`, `rustree/`, `extra/` | Separate libraries with their own build systems. `logmatmul/` has its own `src/` (unrelated to `gpurec/`). `extra/AleRax_modified/` is a reference C++ implementation. |
+| **External** | `logmatmul/`, `extra/` | Separate libraries with their own build systems. `logmatmul/` has its own `src/` (unrelated to `gpurec/`). `extra/AleRax_modified/` is a reference C++ implementation. The build is **fully Rust-free** (`rustree` removed; AleRax sampling is pure Python). |
 
 ## Computational Pipeline
 

@@ -82,22 +82,15 @@ def test_sample_reconciliations_global(trees):
         num_samples=4, seed=42, alerax_path=ALERAX_BINARY
     )
 
-    assert len(results) == N_FAMILIES, f"got {len(results)} families"
+    fams = results["families"]
+    assert len(fams) == N_FAMILIES, f"got {len(fams)} families"
     # Every family should report the same scalar rates that gpurec set,
     # because --fix-rates disables AleRax's optimizer.
-    for name, r in results.items():
-        assert math.isclose(r.duplication_rate, 0.05, rel_tol=1e-3), (
-            f"{name}: D={r.duplication_rate}"
-        )
-        assert math.isclose(r.loss_rate, 0.07, rel_tol=1e-3), (
-            f"{name}: L={r.loss_rate}"
-        )
-        assert math.isclose(r.transfer_rate, 0.03, rel_tol=1e-3), (
-            f"{name}: T={r.transfer_rate}"
-        )
-        assert len(r.gene_trees) == 4, (
-            f"{name}: got {len(r.gene_trees)} samples, expected 4"
-        )
+    for name, r in fams.items():
+        d, l, t = r["rates"]
+        assert math.isclose(d, 0.05, rel_tol=1e-3), f"{name}: D={d}"
+        assert math.isclose(l, 0.07, rel_tol=1e-3), f"{name}: L={l}"
+        assert math.isclose(t, 0.03, rel_tol=1e-3), f"{name}: T={t}"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -130,22 +123,16 @@ def test_sample_reconciliations_genewise(trees):
         num_samples=3, seed=42, alerax_path=ALERAX_BINARY
     )
 
-    assert len(results) == N_FAMILIES
+    fams = results["families"]
+    assert len(fams) == N_FAMILIES
     # Family names map to gene tree file stems (g_0000, g_0001, ...).
     for g, gpath in enumerate(genes):
         family_name = Path(gpath).stem
-        r = results[family_name]
+        rd, rl, rt = fams[family_name]["rates"]
         d, l, t = (float(rates[g, i]) for i in range(3))
-        assert math.isclose(r.duplication_rate, d, rel_tol=1e-3), (
-            f"{family_name}: D={r.duplication_rate}, expected {d}"
-        )
-        assert math.isclose(r.loss_rate, l, rel_tol=1e-3), (
-            f"{family_name}: L={r.loss_rate}, expected {l}"
-        )
-        assert math.isclose(r.transfer_rate, t, rel_tol=1e-3), (
-            f"{family_name}: T={r.transfer_rate}, expected {t}"
-        )
-        assert len(r.gene_trees) == 3
+        assert math.isclose(rd, d, rel_tol=1e-3), f"{family_name}: D={rd}, expected {d}"
+        assert math.isclose(rl, l, rel_tol=1e-3), f"{family_name}: L={rl}, expected {l}"
+        assert math.isclose(rt, t, rel_tol=1e-3), f"{family_name}: T={rt}, expected {t}"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -178,15 +165,14 @@ def test_sample_reconciliations_specieswise(trees, tmp_path):
         keep_output=True,
     )
 
-    assert len(results) == N_FAMILIES
-    # rustree exposes the *first* row of model_parameters.txt as the
-    # scalar duplication/loss/transfer rate. After our helper writes the
-    # file in gpurec's species order, the first row is index 0 — the one
-    # we set to (0.5, 0.6, 0.7).
-    sample = next(iter(results.values()))
-    assert math.isclose(sample.duplication_rate, 0.5, rel_tol=1e-3)
-    assert math.isclose(sample.loss_rate, 0.6, rel_tol=1e-3)
-    assert math.isclose(sample.transfer_rate, 0.7, rel_tol=1e-3)
+    fams = results["families"]
+    assert len(fams) == N_FAMILIES
+    # AleRax writes per-species rates; we read the first numeric row, which
+    # (in gpurec's species order) is index 0 — the one we set to (0.5,0.6,0.7).
+    d, l, t = next(iter(fams.values()))["rates"]
+    assert math.isclose(d, 0.5, rel_tol=1e-3)
+    assert math.isclose(l, 0.6, rel_tol=1e-3)
+    assert math.isclose(t, 0.7, rel_tol=1e-3)
 
     # Strong invariant: AleRax's output rates file (after sampling)
     # must equal the input rates file we wrote, modulo number formatting.

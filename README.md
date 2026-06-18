@@ -139,7 +139,6 @@ gpurec/                         # Repository root
 ├── tests/                      # Pytest suite (unit, integration, gradient, kernel)
 ├── experiments/                # Debug/research scripts
 ├── logmatmul/                  # Log-space matmul library (separate package)
-├── rustree/                    # Rust tree library with Python bindings
 ├── extra/                      # Reference material (AleRax_modified)
 └── docs/                       # Architecture, current state, historical notes
 ```

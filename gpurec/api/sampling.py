@@ -4,15 +4,92 @@ The public entry point is :meth:`GeneReconModel.sample_reconciliations`,
 which delegates here. This module exists separately so the labelling
 machinery (replicating ``PLLRootedTree::ensureUniqueLabels``) does not
 clutter the model class.
+
+Pure-Python / Rust-free: the species-tree Newick parsing and the AleRax
+invocation are implemented here directly (the previous version delegated to
+the ``rustree`` Rust crate). The AleRax binary itself is still required at
+sampling time, but no Rust toolchain or extension is needed to build or import
+gpurec.
 """
 from __future__ import annotations
 
-import os
 import pathlib
+import subprocess
 import tempfile
 from typing import Any
 
 import torch
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Minimal Newick parser (species trees: rooted, binary, optional internal
+# labels + branch lengths). Replaces rustree.parse_species_tree.
+# ──────────────────────────────────────────────────────────────────────
+
+
+class _SpNode:
+    __slots__ = ("name", "parent", "left_child", "right_child")
+
+    def __init__(self) -> None:
+        self.name: str = ""
+        self.parent: int | None = None
+        self.left_child: int | None = None
+        self.right_child: int | None = None
+
+
+def _parse_newick_species_tree(path: str) -> tuple[list[_SpNode], int]:
+    """Parse a Newick species tree into a flat node list.
+
+    Returns ``(nodes, root_idx)`` where each node exposes ``name``, ``parent``,
+    ``left_child``, ``right_child`` (indices into ``nodes``, or ``None``).
+    Branch lengths and support values are ignored. The traversal order matches
+    a recursive-descent parse, so leaf/internal node names are identical to what
+    AleRax sees when it parses the same file.
+    """
+    text = pathlib.Path(path).read_text().strip()
+    nodes: list[_SpNode] = []
+
+    def _new() -> int:
+        nodes.append(_SpNode())
+        return len(nodes) - 1
+
+    pos = 0  # cursor into text
+
+    def parse_clade() -> int:
+        nonlocal pos
+        idx = _new()
+        if pos < len(text) and text[pos] == "(":
+            pos += 1  # consume '('
+            children: list[int] = []
+            while True:
+                child = parse_clade()
+                nodes[child].parent = idx
+                children.append(child)
+                if pos < len(text) and text[pos] == ",":
+                    pos += 1
+                    continue
+                if pos < len(text) and text[pos] == ")":
+                    pos += 1
+                    break
+                break
+            if len(children) >= 1:
+                nodes[idx].left_child = children[0]
+            if len(children) >= 2:
+                nodes[idx].right_child = children[1]
+        # node label: up to ':' (branch length) or a structural char
+        start = pos
+        while pos < len(text) and text[pos] not in ":,();":
+            pos += 1
+        nodes[idx].name = text[start:pos].strip()
+        # skip an optional ':branch_length'
+        if pos < len(text) and text[pos] == ":":
+            pos += 1
+            while pos < len(text) and text[pos] not in ",();":
+                pos += 1
+        return idx
+
+    root = parse_clade()
+    return nodes, root
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -44,17 +121,11 @@ def _alerax_label_map(species_tree_path: str) -> dict[str, str]:
       ``leftLeaf``/``rightLeaf`` are propagated from the left and right
       children in post-order.
 
-    Uses :mod:`rustree` for Newick parsing — both gpurec and AleRax
-    parse the same file, so node names match exactly for nodes that
-    survive the renaming pass.
+    Pure-Python Newick parse (both gpurec and AleRax parse the same file, so
+    node names match exactly for nodes that survive the renaming pass).
     """
-    import rustree
-
-    sp = rustree.parse_species_tree(species_tree_path)
-    n = sp.num_nodes()
-    nodes = [sp.get_node(i) for i in range(n)]
-
-    root = next(i for i in range(n) if nodes[i].parent is None)
+    nodes, root = _parse_newick_species_tree(species_tree_path)
+    n = len(nodes)
 
     # Iterative post-order to avoid recursion-depth issues on big trees.
     post_order: list[int] = []
@@ -168,9 +239,8 @@ def _write_genewise_rates_dir(
 ) -> None:
     """Write per-family ``<family>_rates.txt`` files for AleRax PER-FAMILY mode.
 
-    Family names match the file stems of ``gene_tree_paths`` (which is
-    how :func:`rustree.reconcile_with_alerax` names them when given
-    file paths).
+    Family names match the file stems of ``gene_tree_paths`` (which is how the
+    families file below names them).
     """
     if rates.ndim != 2 or rates.shape[1] != 3:
         raise ValueError(
@@ -190,6 +260,128 @@ def _write_genewise_rates_dir(
         with open(out_path, "w") as f:
             f.write("# D L T\n")
             f.write(f"{d:.10g} {l:.10g} {t:.10g}\n")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# AleRax invocation (pure-Python subprocess; replaces rustree.reconcile_with_alerax)
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _write_families_file(gene_tree_paths: list[str], path: pathlib.Path) -> list[str]:
+    """Write an AleRax ``[FAMILIES]`` file. Returns the family names used."""
+    names: list[str] = []
+    with open(path, "w") as f:
+        f.write("[FAMILIES]\n")
+        for gpath in gene_tree_paths:
+            name = pathlib.Path(gpath).stem
+            names.append(name)
+            f.write(f"- {name}\n")
+            f.write(f"gene_tree = {pathlib.Path(gpath).resolve()}\n")
+    return names
+
+
+def _parse_rates_row(path: pathlib.Path) -> tuple[float, float, float] | None:
+    """Parse the first numeric ``D L T`` (or ``label D L T``) row from an AleRax
+    rates file. Mirrors ``parse_rates_file`` / ``parse_global_rates_file``."""
+    if not path.exists():
+        return None
+    for line in path.read_text().splitlines():
+        t = line.strip()
+        if not t or t.startswith("#"):
+            continue
+        toks = t.split()
+        # drop a leading non-numeric node label if present
+        if toks and not _is_numeric(toks[0]):
+            toks = toks[1:]
+        nums = [float(x) for x in toks if _is_numeric(x)]
+        if len(nums) >= 3:
+            return (nums[0], nums[1], nums[2])
+    return None
+
+
+def _run_alerax(
+    *,
+    species_tree_path: str,
+    gene_tree_paths: list[str],
+    output_dir: pathlib.Path,
+    model: str,
+    num_samples: int,
+    seed: int | None,
+    fix_rates: bool,
+    d: float | None = None,
+    l: float | None = None,
+    t: float | None = None,
+    starting_rates_file: str | None = None,
+    gene_tree_rooting: str | None = None,
+    alerax_path: str = "alerax",
+) -> dict[str, Any]:
+    """Run AleRax in pure-sampling mode via subprocess.
+
+    Faithful to the previous Rust invocation: writes a ``[FAMILIES]`` file and
+    calls ``alerax -s <species> -f <families> -p <out> --model-parametrization
+    <model> --gene-tree-samples <n> [--seed] [--d/--l/--t |
+    --starting-rates-file] [--fix-rates] [--species-tree-search SKIP]``.
+
+    Returns ``{"output_dir", "families": {name: {"rates": (d,l,t)|None}}}``. The
+    sampled reconciliations are written by AleRax under ``output_dir`` (the rich
+    tree-object parsing the Rust crate did is not reimplemented; read the files
+    under ``output_dir`` directly if you need the scenarios).
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    families_file = output_dir / "families.txt"
+    family_names = _write_families_file(gene_tree_paths, families_file)
+
+    cmd: list[str] = [
+        alerax_path,
+        "-s", str(pathlib.Path(species_tree_path).resolve()),
+        "-f", str(families_file),
+        "-p", str(output_dir),
+        "--model-parametrization", model,
+        "--gene-tree-samples", str(num_samples),
+    ]
+    if gene_tree_rooting is not None:
+        cmd += ["--gene-tree-rooting", gene_tree_rooting]
+    if seed is not None:
+        cmd += ["--seed", str(seed)]
+    if d is not None:
+        cmd += ["--d", repr(d)]
+    if l is not None:
+        cmd += ["--l", repr(l)]
+    if t is not None:
+        cmd += ["--t", repr(t)]
+    if starting_rates_file is not None:
+        cmd += ["--starting-rates-file", str(starting_rates_file)]
+    if fix_rates:
+        cmd += ["--fix-rates"]
+    # Fixed rates => never search the species tree topology (would invalidate
+    # per-branch rates); matches the prior behaviour.
+    if fix_rates or starting_rates_file is not None:
+        cmd += ["--species-tree-search", "SKIP"]
+
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except FileNotFoundError as exc:  # alerax not installed / not on PATH
+        raise RuntimeError(
+            f"AleRax binary {alerax_path!r} not found. Install it (e.g. "
+            f"`conda install -c bioconda alerax`) or pass alerax_path=..."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"AleRax failed (exit {exc.returncode}).\n"
+            f"cmd: {' '.join(cmd)}\nstderr:\n{exc.stderr}"
+        ) from exc
+
+    # Parse the rates AleRax wrote back (per-family or shared).
+    model_params = output_dir / "model_parameters"
+    families: dict[str, Any] = {}
+    for name in family_names:
+        per_fam = model_params / f"{name}_rates.txt"
+        rates = _parse_rates_row(per_fam)
+        if rates is None:
+            rates = _parse_rates_row(model_params / "model_parameters.txt")
+        families[name] = {"rates": rates}
+
+    return {"output_dir": str(output_dir), "families": families}
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -219,9 +411,10 @@ def sample_reconciliations(
     The combined ``genewise + specieswise`` mode and ``pairwise``
     transfers have no AleRax equivalent and raise
     :class:`NotImplementedError`.
-    """
-    import rustree
 
+    Returns ``{"output_dir", "families": {name: {"rates": (d,l,t)|None}}}``;
+    the sampled reconciliation files live under the AleRax output directory.
+    """
     ds = model._dataset
     if ds.pairwise:
         raise NotImplementedError(
@@ -249,13 +442,12 @@ def sample_reconciliations(
     rates_dir = out_root / "starting_rates"
     alerax_run_dir = out_root / "alerax_run"
 
-    kwargs: dict[str, Any] = dict(
-        species_tree=str(ds.species_tree_path),
-        gene_trees=[str(p) for p in ds.gene_tree_paths],
+    common: dict[str, Any] = dict(
+        species_tree_path=str(ds.species_tree_path),
+        gene_tree_paths=[str(p) for p in ds.gene_tree_paths],
+        output_dir=alerax_run_dir,
         num_samples=num_samples,
-        output_dir=str(alerax_run_dir),
         seed=seed,
-        keep_output=keep_output or (output_dir is not None),
         alerax_path=alerax_path,
         fix_rates=True,
     )
@@ -263,7 +455,7 @@ def sample_reconciliations(
     mode = model._mode
     if mode == "global":
         d, l_, t = (float(x) for x in rates.detach().cpu().tolist())
-        kwargs.update(model="GLOBAL", d=d, l=l_, t=t)
+        common.update(model="GLOBAL", d=d, l=l_, t=t)
     elif mode == "specieswise":
         _write_specieswise_rates_dir(
             rates,
@@ -271,25 +463,19 @@ def sample_reconciliations(
             str(ds.species_tree_path),
             rates_dir,
         )
-        kwargs.update(
-            model="PER-SPECIES",
-            starting_rates_file=str(rates_dir),
-        )
+        common.update(model="PER-SPECIES", starting_rates_file=str(rates_dir))
     elif mode == "genewise":
         _write_genewise_rates_dir(
             rates,
             [str(p) for p in ds.gene_tree_paths],
             rates_dir,
         )
-        kwargs.update(
-            model="PER-FAMILY",
-            starting_rates_file=str(rates_dir),
-        )
+        common.update(model="PER-FAMILY", starting_rates_file=str(rates_dir))
     else:
         raise NotImplementedError(f"unsupported mode: {mode!r}")
 
     try:
-        return rustree.reconcile_with_alerax(**kwargs)
+        return _run_alerax(**common)
     finally:
         if tmp_holder is not None and not keep_output:
             tmp_holder.cleanup()

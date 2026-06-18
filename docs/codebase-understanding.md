@@ -104,7 +104,7 @@ The public wrapper `implicit_grad_loglik_vjp_wave` (`implicit_grad.py:20`) bundl
 - **`api/model.py` — `GeneReconModel`** (`:169`): the notebook-friendly `nn.Module` facade. `theta` is an `nn.Parameter`; `forward()` returns differentiable NLL. `from_trees` (`:247`) is the one-liner constructor. Custom `_apply` (`:426`) walks the cached `ReconStaticState` on `.to()`/`.cuda()` and resets `warm_E`.
 - **`api/autograd.py`** — `ReconStaticState` dataclass (`:37`, holds non-diff state + mutable `warm_E`) and `_GeneReconFunction` (`:148`, the autograd bridge). Writes no new math; packages the existing pipeline behind one `torch.autograd.Function`.
 - **`api/modes.py`** — `_MODE_MAP` {global, specieswise, genewise} → flags; `_mode_to_flags`; `_default_theta_init`. Pairwise is intentionally excluded.
-- **`api/sampling.py`** — AleRax export bridge: replicates `ensureUniqueLabels`, writes rate files, calls `rustree.reconcile_with_alerax --fix-rates`.
+- **`api/sampling.py`** — AleRax export bridge (pure Python, **no Rust**): a small Newick parser replicates `ensureUniqueLabels`, writes rate files, and shells out to the `alerax` binary with `--fix-rates`.
 - **`cli/reconcile.py`** — the `gpurec` console script. **Uses the OLD `GeneDataset.compute_likelihood` API, NOT `GeneReconModel`**, global-mode only, prints +log_likelihood. Does not exercise the autograd/gradient path.
 - **`__init__.py`** — best-effort exports `GeneReconModel`, swallowing `ImportError` so `import gpurec` succeeds even when the JIT build is missing (in which case `gpurec.GeneReconModel` is silently absent).
 
@@ -112,8 +112,12 @@ The public wrapper `implicit_grad_loglik_vjp_wave` (`implicit_grad.py:20`) bundl
 - **`io/ale.py`** — pure-Python `.ale` → CCP adapter. `parse_ale_file` (`:93`) → `AleData`; `build_family_from_ale` (`:207`) emits the same per-family dict shape as `preprocess_multiple_families`; `_build_ccp_arrays` (`:334`) is a field-for-field port of the C++ `build_ccp_arrays`. Synthesizes the implicit root clade Gamma, builds internal splits from `Dip_counts` and root splits from `Bip_counts` (dedup both sides of each bipartition). Emits **natural-log** split probs (matches C++). Intentionally omits `phased_waves` (consumers fall back to BFS scheduling). Untracked working-tree feature.
 - **`utils/debug.py`** — standalone tensor-debugging toolkit (stats, health checks, comparison, gradient-flow, `DebugContext`). No gpurec imports, no in-package callers.
 
-### Zone: rustree / external
-`rustree` (Rust tree library, used by `api/sampling.py` for `parse_species_tree` / `reconcile_with_alerax`), the external `AleRax` binary (sampling + the e2e likelihood oracle), the `logmatmul` library (log2-space matmul, optional), and `extra/AleRax_modified` (C++ reference, documented in `docs/alerax_explanation.md`).
+### Zone: external
+The build is **fully Rust-free** (the `rustree` crate was removed; the AleRax
+sampling bridge in `api/sampling.py` is pure Python). External pieces: the
+`AleRax` binary (sampling + the e2e likelihood oracle), the `logmatmul` library
+(log2-space matmul, optional), and `extra/AleRax_modified` (C++ reference,
+documented in `docs/alerax_explanation.md`).
 
 ---
 

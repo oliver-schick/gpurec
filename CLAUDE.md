@@ -38,7 +38,7 @@ recast as a differentiable, batched GPU computation. Repo: `github.com/SisyphusM
 | High-level API | `api/{model,autograd,modes,sampling}.py` | `GeneReconModel` (nn.Module), autograd bridge, AleRax sampling |
 | CLI | `cli/reconcile.py` | `gpurec` command |
 | **.ale loader (new)** | `io/ale.py` | classic ALEobserve `.ale` → CCP arrays (see below) |
-| External | `rustree/` (Rust+pyo3, present), `logmatmul/`, `extra/AleRax_modified/` (gitignored) | sim/IO/AleRax bridge; vendored log-matmul; C++ reference |
+| External | `logmatmul/`, `extra/AleRax_modified/` (gitignored) | vendored log-matmul; C++ reference. **Rust-free**: `rustree` removed; the AleRax sampling bridge is pure Python (`api/sampling.py`). |
 
 ## Computational pipeline
 **Forward** (`api/autograd.py:_GeneReconFunction.forward`, or `GeneDataset.compute_likelihood_batch`):

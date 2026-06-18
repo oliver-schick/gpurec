@@ -31,9 +31,6 @@ tests/data/**/output/
 # Thesis (separate repo)
 These/
 
-# Rust build artifacts
-rustree/target/
-
 # Test benchmark outputs
 tests/integration/*.csv
 tests/profiling/*.png

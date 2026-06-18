@@ -373,8 +373,10 @@ class GeneReconModel(torch.nn.Module):
         ``genewise+specieswise`` and ``pairwise`` raise
         :class:`NotImplementedError`).
 
-        Returns a ``dict`` mapping family name → ``PyAleRaxResult``
-        (see :func:`rustree.reconcile_with_alerax`).
+        Returns a ``dict`` ``{"output_dir": ..., "families": {name:
+        {"rates": (D, L, T) | None}}}``; the sampled reconciliation files are
+        written under the AleRax output directory. (Pure-Python AleRax bridge,
+        no Rust.)
         """
         from .sampling import sample_reconciliations as _impl
         return _impl(

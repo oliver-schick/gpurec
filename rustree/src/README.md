@@ -1,8 +1,0 @@
-- alerax.rs: make sure it works properly and we can easily obtain reconciled scenarios in the right format (including all mappings), rename back to original names (species tree and all gene trees), etc...
-- comparison.rs: I don't use it yet, so maybe don't do anything?
-- induced_transfers.rs: not tested. Need to test and create R bindings. Compare the number of expected induced transfers with the actual number of inferred transfers with ALERax?
-- metric_functions.rs: didn't test the LCA stuff with euler tour. Need to look into it.
-- sampling.rs: need to test it thoroughly. Make sure we can sample a species tree and all associated gene trees, even if there is no reconciliation.
-- surgery.rs: make sure it works properly, and python bindings work pretty much like in ete3. For instance, we need to be able to: 1. Remove a clade from the species tree and all associated gene trees 2. reconcile with ALERax 3. Obtain summary statistics easily.
-- See with Damien for R bindings.
-- Relationship with ale-gpu: maybe integrate the components that allowed us to generate the necessary data structures, corresponding to ALERax.
