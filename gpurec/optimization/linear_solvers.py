@@ -57,7 +57,21 @@ def _cg(
         iters = k
 
     rel_res = float(r.norm()) / bnorm
-    return x, LinearSolveStats("CG", iters, rel_res, fallback_used=False), success
+    # CG assumes a symmetric positive-definite operator. For the implicit-gradient
+    # E adjoint A = (I - G_E^T) this only holds approximately: the fraction-missing
+    # leaf boundary (per-leaf p_obs) makes G_E strongly non-symmetric (max|A-A^T|
+    # ~0.5 vs ~0.06 without it), so CG can exhaust ``maxiter`` while ``pAp`` stays
+    # positive and still leave a large residual (rel_res ~20). Previously this path
+    # returned success=True regardless of residual, so the caller accepted the wrong
+    # solve and never fell back to GMRES — corrupting dNLL/dtheta whenever
+    # fraction-missing is active. ``success`` must reflect ACTUAL convergence.
+    #
+    # A generous slack band (100x tol) keeps genuinely near-converged solves (e.g.
+    # the near-symmetric fm=0 operator, which reaches rel_res just shy of a very
+    # tight tol) classified as success, so the no-fraction-missing path is byte
+    # unchanged, while the fraction-missing non-convergence is still caught.
+    converged = math.isfinite(rel_res) and rel_res <= 100.0 * tol
+    return x, LinearSolveStats("CG", iters, rel_res, fallback_used=False), (success and converged)
 
 
 @torch.no_grad()

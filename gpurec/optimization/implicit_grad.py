@@ -49,6 +49,7 @@ def implicit_grad_loglik_vjp_wave(
     transfer_mat_unnormalized: Optional[torch.Tensor] = None,
     ancestors_T: Optional[torch.Tensor] = None,
     uniform_pibar_row_max: Optional[torch.Tensor] = None,
+    leaf_E: Optional[torch.Tensor] = None,
 ):
     """Compute ∇θ logL using wave-decomposed backward pass + E adjoint.
 
@@ -79,6 +80,7 @@ def implicit_grad_loglik_vjp_wave(
         transfer_mat=transfer_mat,
         ancestors_T=ancestors_T,
         uniform_pibar_row_max=uniform_pibar_row_max,
+        leaf_obs_log=leaf_E,
     )
     torch.cuda.synchronize()
     _t_pi_bwd = time.perf_counter() - _t_pi_bwd_0
@@ -93,6 +95,7 @@ def implicit_grad_loglik_vjp_wave(
         pibar_mode=pibar_mode, transfer_mat=transfer_mat,
         transfer_mat_unnormalized=transfer_mat_unnormalized,
         ancestors_T=ancestors_T,
+        leaf_E=leaf_E,
     )
     statsG.pi_bwd_time = _t_pi_bwd
     return grad_theta, statsG
@@ -110,8 +113,14 @@ def _e_adjoint_and_theta_vjp(
     cg_tol=1e-8, cg_maxiter=500, gmres_restart=40,
     pibar_mode='uniform',
     transfer_mat=None, transfer_mat_unnormalized=None, ancestors_T=None,
+    leaf_E=None,
 ):
     """E adjoint solve + theta VJP from pre-computed Pi backward result.
+
+    ``leaf_E`` (optional [S]) is the fraction-missing leaf extinction boundary
+    ``log2(1 - p_obs_l)``. It MUST be threaded into every ``E_step`` call below so
+    the (I - G_E^T) operator and the theta->E VJP use the same fixed-point map as
+    the forward E solve; otherwise the E adjoint gradient is inconsistent.
 
     Takes pi_bwd dict (from Pi_wave_backward) and completes the gradient
     computation through E adjoint solve and extract_parameters VJP.
@@ -189,6 +198,7 @@ def _e_adjoint_and_theta_vjp(
             log_pS, log_pD, log_pL,
             transfer_mat, max_transfer_mat, pibar_mode=pibar_mode,
             ancestors_T=ancestors_T,
+            leaf_E=leaf_E,
         )[0]
 
     # Build VJP for G_E
@@ -260,6 +270,7 @@ def _e_adjoint_and_theta_vjp(
                 return E_step(
                     E_star.detach(), sp_P_idx, sp_c12_idx,
                     th_pS, th_pD, th_pL, th_tm, th_mt, pibar_mode='dense',
+                    leaf_E=leaf_E,
                 )[0]
 
             E_from_theta = G_E_theta(log_pS_r2, log_pD_r2, log_pL_r2, transfer_mat_r2, mt_r2)
@@ -274,6 +285,7 @@ def _e_adjoint_and_theta_vjp(
                     E_star.detach(), sp_P_idx, sp_c12_idx,
                     th_pS, th_pD, th_pL, None, th_mt,
                     pibar_mode='uniform', ancestors_T=ancestors_T,
+                    leaf_E=leaf_E,
                 )[0]
 
             E_from_theta = G_E_theta(log_pS_r2, log_pD_r2, log_pL_r2, mt_r2)

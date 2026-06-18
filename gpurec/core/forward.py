@@ -413,6 +413,7 @@ def Pi_wave_forward(
     topk_k: int = 16,
     family_idx: torch.Tensor | None = None,
     return_original: bool = True,
+    leaf_obs_log: torch.Tensor | None = None,
 ):
     """Wave-based Pi forward pass with wave-ordered layout (v2).
 
@@ -438,6 +439,13 @@ def Pi_wave_forward(
         topk_k: number of top-k entries per clade for pibar_mode='topk' (default 16)
         family_idx: Long[C] clade→family mapping in wave-ordered space.
                     When provided, parameters are [G, ...] and indexed per-clade.
+        leaf_obs_log: optional [S] tensor = log2(1 - p_obs_l) = log2(fraction_missing_l),
+                      -inf at observed/internal species. Implements the fraction-missing
+                      Pi leaf boundary Pi_{l,gamma} = sigma + (1-sigma)(1 - p_obs_l):
+                      the (1-sigma) baseline is injected at species-leaf columns of
+                      clade_species_map before the sigma=1 (mapped leaf) 0.0 override.
+                      None (default) -> every gene observed (byte-identical to before).
+                      ``leaf_obs_log > -inf`` is itself the missing-leaf column mask.
 
     Returns:
         dict with 'Pi' (in original clade order when requested),
@@ -511,6 +519,7 @@ def Pi_wave_forward(
         and not use_uniform_two_kernel
         and not use_uniform_spmm
         and leaf_species_index is not None
+        and leaf_obs_log is None
     )
     reuse_forward_pibar_stats = bool(
         use_uniform_fused
@@ -554,6 +563,19 @@ def Pi_wave_forward(
         SL1_const = _pS + E_s2
         SL2_const = _pS + E_s1
 
+    # Fraction-missing Pi leaf boundary: at species-leaf columns every clade carries
+    # the (1-sigma) baseline log2(1 - p_obs_l); the sigma=1 (mapped leaf) cells are
+    # overwritten to log2(1)=0 afterwards. ``leaf_obs_log > NEG_INF`` IS the missing
+    # species-leaf column mask. No-op when leaf_obs_log is None.
+    _fm_leaf_cols = leaf_obs_log > NEG_INF if leaf_obs_log is not None else None
+
+    def _apply_leaf_obs_baseline(mat):
+        """Inject the (1-sigma) fraction-missing baseline into a [*, S] log2 tensor
+        (cols indexed by species) before the 0.0 sigma=1 override. No-op if disabled."""
+        if leaf_obs_log is not None:
+            mat[..., _fm_leaf_cols] = leaf_obs_log[_fm_leaf_cols].to(dtype=dtype)
+        return mat
+
     ancestors_T_mat = None
     ancestors_spmm_mat = None
     with _nvtx_range("Pi setup pibar mode"):
@@ -574,12 +596,14 @@ def Pi_wave_forward(
                 leaf_term = None
             else:
                 clade_species_map = torch.full((C, S), NEG_INF, device=device, dtype=dtype)
+                _apply_leaf_obs_baseline(clade_species_map)
                 clade_species_map[leaf_row_index, leaf_col_index] = 0.0
                 leaf_term = None if batched else log_pS + clade_species_map
             transfer_mat_T = None
             transfer_mat_c = None
         else:
             clade_species_map = torch.full((C, S), NEG_INF, device=device, dtype=dtype)
+            _apply_leaf_obs_baseline(clade_species_map)
             clade_species_map[leaf_row_index, leaf_col_index] = 0.0
             leaf_term = None if batched else log_pS + clade_species_map
             if transfer_mat is not None:
@@ -609,9 +633,14 @@ def Pi_wave_forward(
             )
 
     def _get_leaf_mask(ws, we):
-        """Return [W, S] mask with 0.0 at leaf positions, NEG_INF elsewhere."""
+        """Return [W, S] mask with 0.0 at leaf positions, NEG_INF elsewhere.
+
+        With fraction-missing active, species-leaf columns carry the (1-sigma)
+        baseline log2(1 - p_obs_l) before the 0.0 sigma=1 override.
+        """
         W = we - ws
         lwt = torch.full((W, S), NEG_INF, device=device, dtype=dtype)
+        _apply_leaf_obs_baseline(lwt)
         m = (leaf_row_index >= ws) & (leaf_row_index < we)
         if m.any():
             lwt[leaf_row_index[m] - ws, leaf_col_index[m]] = 0.0

@@ -31,6 +31,7 @@ class GeneDataset(Dataset):
         device=None,
         preprocess_cache_dir: str | os.PathLike | None = None,
         refresh_preprocess_cache: bool = False,
+        fraction_missing: torch.Tensor | None = None,
     ):
         if device is None:
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -73,6 +74,30 @@ class GeneDataset(Dataset):
         self.tr_mat_unnormalized = torch.log2(self.species_helpers["Recipients_mat"])
         self.unnorm_row_max = self.tr_mat_unnormalized.max(dim=-1).values  # [S], precomputed
         self.S = int(self.species_helpers['S'])
+
+        # Fraction-missing (per-leaf p_obs) leaf boundary. `fraction_missing` is an
+        # optional linear-space [S] vector with fraction_missing_l per species node
+        # (0 for fully-observed leaves and internal nodes). We derive a single log2
+        # tensor self.leaf_E = log2(1 - p_obs_l) = log2(fraction_missing_l) at missing
+        # species-leaves, -inf elsewhere. It serves BOTH the E extinction boundary and
+        # the Pi leaf boundary (identical), and is what callers pass to
+        # optimize_theta_wave(..., leaf_E=...). None when fraction_missing is None.
+        # species-tree leaf mask: nodes that are never internal parents
+        sP = self.species_helpers['s_P_indexes']
+        internal = sP[sP < self.S].unique()
+        leaf_species_mask = torch.ones(self.S, dtype=torch.bool, device=sP.device)
+        leaf_species_mask[internal] = False
+        self.leaf_species_mask = leaf_species_mask  # [S] bool
+        if fraction_missing is None:
+            self.leaf_E = None
+        else:
+            fm = fraction_missing.to(device=leaf_species_mask.device, dtype=dtype)
+            missing = leaf_species_mask & (fm > 0)
+            self.leaf_E = torch.where(
+                missing,
+                torch.log2(fm.clamp_min(torch.finfo(dtype).tiny)),
+                torch.full_like(fm, float("-inf")),
+            )
 
         # creating an initial theta (log2-space: rates = 2^theta)
         _THETA_INIT = math.log2(1e-10)

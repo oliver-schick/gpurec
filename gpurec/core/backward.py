@@ -402,6 +402,7 @@ def Pi_wave_backward(
     ancestors_T=None,
     family_idx=None,
     uniform_pibar_row_max=None,
+    leaf_obs_log=None,
 ):
     """Wave-decomposed backward pass for implicit gradient computation.
 
@@ -428,6 +429,12 @@ def Pi_wave_backward(
         family_idx: Long[C] clade→family mapping. None → auto-wrapped as G=1.
         uniform_pibar_row_max: optional [C] final forward-side row max values
             for uniform Pibar. Used only by opt-in fused cross-Pibar VJP paths.
+        leaf_obs_log: optional [S] tensor = log2(1 - p_obs_l) = log2(fraction_missing_l),
+            -inf at observed/internal species. MUST match the value passed to
+            Pi_wave_forward: the backward recomputes the self-loop softmax (incl. the
+            leaf term) rather than reading saved Pi, so the same fraction-missing
+            baseline must be injected here or gradients are inconsistent. None ->
+            byte-identical to before.
 
     Returns:
         dict with:
@@ -825,12 +832,25 @@ def Pi_wave_backward(
     leaf_col_index = wave_layout['leaf_col_index']
     leaf_species_index = wave_layout.get('leaf_species_index')
 
+    # Fraction-missing Pi leaf boundary (mirror Pi_wave_forward): species-leaf
+    # columns carry the (1-sigma) baseline log2(1 - p_obs_l) before the 0.0
+    # sigma=1 override. ``leaf_obs_log > NEG_INF`` IS the missing-leaf column mask.
+    _fm_leaf_cols = leaf_obs_log > NEG_INF if leaf_obs_log is not None else None
+
+    def _apply_leaf_obs_baseline(mat):
+        """Inject the (1-sigma) fraction-missing baseline into a [*, S] log2 tensor
+        (cols indexed by species) before the 0.0 sigma=1 override. No-op if disabled."""
+        if leaf_obs_log is not None:
+            mat[..., _fm_leaf_cols] = leaf_obs_log[_fm_leaf_cols].to(dtype=dtype)
+        return mat
+
     use_uniform_leaf_index = bool(
         os.environ.get("GPUREC_BACKWARD_LEAF_INDEX", "1") != "0"
         and _auto_wrapped
         and pibar_mode == 'uniform'
         and device.type == 'cuda'
         and leaf_species_index is not None
+        and leaf_obs_log is None
     )
     uniform_leaf_logp = None
     if use_uniform_leaf_index:
@@ -873,6 +893,9 @@ def Pi_wave_backward(
         os.environ.get("GPUREC_DENSE_LEAF_MASK_FROM_INDEX", "0") != "0"
         and leaf_species_index is not None
         and not (can_use_fused_uniform_backward and use_uniform_leaf_index)
+        # The torch.where index path cannot carry the per-column fraction-missing
+        # baseline; fall through to the scatter builder which injects it.
+        and leaf_obs_log is None
     )
     leaf_species_lanes = (
         torch.arange(S, device=device)
@@ -897,6 +920,7 @@ def Pi_wave_backward(
             )
 
         lwt = torch.full((W, S), NEG_INF, device=device, dtype=dtype)
+        _apply_leaf_obs_baseline(lwt)
         mask = (leaf_row_index >= ws) & (leaf_row_index < we)
         if mask.any():
             lwt[leaf_row_index[mask] - ws, leaf_col_index[mask]] = 0.0

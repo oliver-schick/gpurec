@@ -63,6 +63,12 @@ def optimize_theta_wave(
     optimizer: str = 'adam',
     momentum: float = 0.9,
     verbose: bool = False,
+    leaf_E: torch.Tensor | None = None,
+    brownian_sigma=None,
+    brownian_root_sigma: float = 5.0,
+    brownian_mu=None,
+    parent_index: torch.Tensor | None = None,
+    theta_bounds=None,
 ):
     """Optimize theta using wave forward/backward + implicit gradient.
 
@@ -100,6 +106,32 @@ def optimize_theta_wave(
         RNG seed used for stochastic family-batch sampling.
     momentum : float
         Momentum for SGD (default 0.9, ignored for adam/lbfgs).
+    leaf_E : Tensor [S] | None
+        Optional fraction-missing leaf boundary, log2(1 - p_obs_l) = log2(fraction
+        missing) at missing species-leaves and -inf elsewhere. A single [S] tensor
+        serves BOTH the E extinction boundary (passed as leaf_E to E_fixed_point and
+        the E adjoint E_steps) and the Pi leaf boundary (passed as leaf_obs_log to
+        Pi_wave_forward / backward), since they are identical. None (default) ->
+        every gene observed (byte-identical to before).
+    brownian_sigma : float | Tensor [3] | None
+        Std (log2 units) of the time-uniform TKP Brownian rate prior coupling
+        adjacent branches' log-rates. None (default) disables the prior and keeps
+        the path byte-identical to before. Scalar or per-axis [3] (D, L, T).
+        Only applies in specieswise mode (theta [S,3]); ignored otherwise.
+    brownian_root_sigma : float | Tensor [3]
+        Std (log2 units) of the root-anchor term (propriety). Default 5.0.
+    brownian_mu : float | Tensor [3] | None
+        Root-anchor centre (log2 units). None (default) -> use the theta_init
+        root row (i.e. log2(init_rate)) so the prior is centred at the init.
+    parent_index : LongTensor [S] | None
+        Parent of each species node (root maps to -1/self), from
+        ``species_parent_index(species_helpers)``. Required when brownian_sigma
+        is not None.
+    theta_bounds : tuple | None
+        Optional box constraints (log2 units) on theta for the L-BFGS-B path,
+        AleRax-style. ``(lo, hi)`` scalars applied to every element, or a tuple
+        of two arrays broadcastable to the flattened theta. None (default) keeps
+        the current behavior (lower bound = log2(1e-10), no upper bound).
 
     Returns
     -------
@@ -109,6 +141,50 @@ def optimize_theta_wave(
         device = theta_init.device
 
     _THETA_MIN = math.log2(1e-10)
+
+    # --- Brownian (TKP) rate prior setup -----------------------------------
+    # Only meaningful for specieswise theta [S,3]; skip otherwise so the
+    # global/genewise paths stay byte-identical.
+    _use_prior = brownian_sigma is not None
+    if _use_prior and not (specieswise and theta_init.ndim == 2 and theta_init.shape[-1] == 3):
+        if verbose:
+            print("  [brownian prior requested but theta is not specieswise [S,3]; "
+                  "skipping prior]", flush=True)
+        _use_prior = False
+    _prior_parent_index = None
+    _prior_sigma = None
+    _prior_root_sigma = None
+    _prior_mu = None
+    if _use_prior:
+        from gpurec.core.tree_prior import (
+            brownian_log_prior_and_grad as _brownian_prior,
+            species_parent_index as _species_parent_index,
+        )
+        if parent_index is None:
+            _prior_parent_index = _species_parent_index(species_helpers).to(device)
+        else:
+            _prior_parent_index = parent_index.to(device=device, dtype=torch.long)
+        _prior_sigma = brownian_sigma
+        _prior_root_sigma = brownian_root_sigma
+        # Default root-anchor centre = theta_init root row (== log2(init_rate)
+        # for a uniform init), so the prior is centred at the initialization.
+        if brownian_mu is None:
+            _ti = theta_init.to(device=device, dtype=dtype)
+            arange_S = torch.arange(_ti.shape[0], device=device)
+            _is_root = (_prior_parent_index < 0) | (_prior_parent_index == arange_S)
+            _root_ids = torch.nonzero(_is_root, as_tuple=False).flatten()
+            _prior_mu = _ti[int(_root_ids[0].item())].clone()
+        else:
+            _prior_mu = brownian_mu
+
+    def _apply_prior(theta_d, nll, grad_theta):
+        """Add the Brownian penalty to nll and its gradient to grad_theta."""
+        if not _use_prior:
+            return nll, grad_theta
+        penalty, p_grad = _brownian_prior(
+            theta_d, _prior_parent_index, _prior_sigma, _prior_root_sigma, _prior_mu,
+        )
+        return nll + float(penalty.item()), grad_theta + p_grad
 
     # Precompute ancestors_T for uniform mode
     _ancestors_T = None
@@ -240,6 +316,7 @@ def optimize_theta_wave(
                     warm_start_E=warm_E,
                     dtype=dtype, device=device, pibar_mode=pibar_mode,
                     ancestors_T=_ancestors_T,
+                    leaf_E=leaf_E,
                 )
         except torch.OutOfMemoryError as exc:
             raise torch.OutOfMemoryError(
@@ -279,6 +356,7 @@ def optimize_theta_wave(
                         log_pS=log_pS, log_pD=log_pD, log_pL=log_pL,
                         transfer_mat=transfer_mat, max_transfer_mat=mt,
                         device=device, dtype=dtype, pibar_mode=pibar_mode,
+                        leaf_obs_log=leaf_E,
                     )
                     logL_b = compute_log_likelihood(Pi_out_b['Pi'], E_out['E'], roots_b)
                     nll += float(logL_b.sum().item())
@@ -322,6 +400,7 @@ def optimize_theta_wave(
                         transfer_mat=transfer_mat,
                         transfer_mat_unnormalized=transfer_mat_unnormalized,
                         ancestors_T=_ancestors_T,
+                        leaf_E=leaf_E,
                     )
                 except torch.OutOfMemoryError as exc:
                     raise torch.OutOfMemoryError(
@@ -392,6 +471,7 @@ def optimize_theta_wave(
 
             t_start = time.perf_counter()
             nll, grad_theta, statsG, E_out = _forward_backward(theta_d, warm_E_ref[0])
+            nll, grad_theta = _apply_prior(theta_d, nll, grad_theta)
             step_time = time.perf_counter() - t_start
             warm_E_ref[0] = E_out['E'].detach()
 
@@ -424,7 +504,16 @@ def optimize_theta_wave(
             return return_nll, grad_np
 
         x0 = theta_t.reshape(-1).cpu().to(torch.float64).numpy()
-        bounds = [(_THETA_MIN, None)] * len(x0)
+        if theta_bounds is None:
+            # Current behavior: lower bound = log2(1e-10), no upper bound.
+            bounds = [(_THETA_MIN, None)] * len(x0)
+        else:
+            # AleRax-style box constraints (log2 units). Accept scalar (lo, hi)
+            # applied to every element, or per-element arrays broadcastable to x0.
+            lo_in, hi_in = theta_bounds
+            lo_arr = np.broadcast_to(np.asarray(lo_in, dtype=np.float64), x0.shape)
+            hi_arr = np.broadcast_to(np.asarray(hi_in, dtype=np.float64), x0.shape)
+            bounds = [(float(lo_arr[i]), float(hi_arr[i])) for i in range(len(x0))]
         result = scipy_minimize(
             forward_and_grad, x0, method='L-BFGS-B', jac=True,
             bounds=bounds,
@@ -485,6 +574,14 @@ def optimize_theta_wave(
                     stochastic_seed=stochastic_seed,
                     optimizer='lbfgs',
                     verbose=verbose,
+                    leaf_E=leaf_E,
+                    brownian_sigma=brownian_sigma,
+                    brownian_root_sigma=brownian_root_sigma,
+                    # Pass the RESOLVED root-anchor centre (not None) so the
+                    # float64 retry keeps the same prior centre as phase 1.
+                    brownian_mu=_prior_mu if _use_prior else brownian_mu,
+                    parent_index=_prior_parent_index if _use_prior else parent_index,
+                    theta_bounds=theta_bounds,
                 )
                 # Merge histories: float32 phase first, then float64 phase
                 result64["history"] = history + result64["history"]
@@ -516,6 +613,7 @@ def optimize_theta_wave(
 
         t_start = time.perf_counter()
         nll, grad_theta, statsG, E_out = _forward_backward(theta_d, warm_E, selected_batch_ids=selected_batch_ids)
+        nll, grad_theta = _apply_prior(theta_d, nll, grad_theta)
         warm_E = E_out['E'].detach()
         iters_E = int(E_out['iterations'])
 
