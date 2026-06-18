@@ -1,7 +1,7 @@
 # Replicating AleRax branch-wise DTL rates with gpurec on Williams et al. 2017
 
 **Status:** branch `cpp-rust-free`. Runs on OIST Saion (A100; torch 2.6.0+cu124, triton 3.2.0, gcc 11.2.1).
-**TL;DR:** gpurec reproduces AleRax's per-branch DTL rates well **without** fraction-missing. The fraction-missing implementation is **faithful to the AleRax supplement (no sign / `1-x` error)**, but enabling it **inflates the inferred loss rate** — a real, expected consequence of the observability/ascertainment denominator in the UndatedDTL likelihood, *not* a bug. The open question is whether AleRax behaves identically; **this needs an AleRax run to confirm (see "For Oliver").**
+**TL;DR:** **without** fraction-missing, gpurec recovers AleRax's per-branch **duplication and transfer** rates (per-branch Pearson ~0.55–0.58 on log-rates, medians within ~15–65%); **loss is not recovered per-branch** (Pearson ~0.04) — the expected limit of free-per-branch gpurec vs AleRax's clade-*grouped* reference. The fraction-missing implementation is **faithful to the AleRax supplement (no sign / `1-x` error)**, but enabling it **inflates the inferred loss rate** — a real, expected consequence of the observability/ascertainment denominator in the UndatedDTL likelihood, *not* a bug. The open question is whether AleRax behaves identically; **this needs an AleRax run to confirm (see §6, "For Oliver").**
 
 ---
 
@@ -48,6 +48,25 @@ AleRax `branch wise` Eury reference (background tuple): **D≈0.075, L≈0.22, T
 | tight prior (σ=0.25) | 0.071 | 17.8 | 1072 |
 | AleRax-style (σ=0.25 + bounds [1e-10,10]) | 0.066 | **10 (pegged at bound)** | 10 |
 
+### 4a. Per-branch match quality (no-fm, full data, σ=0.25)
+
+How well does gpurec recover AleRax's *per-branch* rates (not just the median)? Aligning the 60 leaf branches by species name on log-rates:
+
+| dataset | axis | Pearson(log) | Spearman | median ratio g/a |
+|---|---|---|---|---|
+| **≥4-species (3,946 fam)** | **D** | **0.58** | 0.48 | 0.85 |
+| | **L** | 0.04 | 0.05 | 4.4 |
+| | **T** | **0.55** | 0.53 | 1.66 |
+| **complete set (31,236 fam, + small_fams)** | **D** | 0.38 | 0.27 | 1.99 |
+| | **L** | 0.14 | 0.06 | 6.4 |
+| | **T** | **0.52** | 0.55 | 1.18 |
+
+**Read-out:** on the AleRax-comparable ≥4-species set, gpurec **recovers per-branch duplication and transfer** rates (Pearson 0.58 / 0.55; medians within ~15–65%). **Loss is not recovered per-branch** (Pearson 0.04, ~4× median) — the structural limit of comparing free-per-branch gpurec to AleRax's *clade-grouped* (17-class) reference, with loss the least-identifiable axis. With fm ON the correlations collapse to ~0/negative and loss inflates 20–90× (§5).
+
+### 4b. Bigger dataset — complete archaea60 (+ small_fams, 31,236 families)
+
+Adding the 25,790 small (1–3-leaf, mostly single-gene) families — the complete `archaea60` set, all 60 species in-tree — runs cleanly (≈21 s/step, ~30 min, no OOM). No-fm medians shift up: **D 0.124, L 0.68, T 0.13** (vs 0.057/0.46/0.18 on ≥4-species). The single-gene families add origination/duplication signal that AleRax's branch-wise analysis *excluded* (it keeps only ≥4-species families), so the D median ~doubles and the D correlation drops (0.58→0.38) while T stays good (0.52). This is exactly the family-inclusion-threshold sensitivity flagged in the `recount` PNAS letter — the inferred rates depend on which families you include. (The with-fm complete-set run is still finishing; its loss will inflate as in §5.)
+
 ## 5. The fraction-missing finding (the headline)
 
 **The implementation is faithful to AleRaxSupp.tex — there is no `1-fraction_missing` / sign / wrong-column error.** Verified line-by-line and re-verified independently:
@@ -80,8 +99,9 @@ If AleRax-with-fm *also* inflates loss, gpurec is faithful to AleRax (and the in
 
 ## 7. Open / not-yet-resolved
 
-- Complete archaea60 set (`+ small_fams`, ~31,236 families) runs ±fm are in flight (results to append).
-- The AleRax reference is **clade-grouped** (17 rate classes); gpurec's specieswise is free-per-branch + prior. A tight prior approximates grouping but is not identical; matching the exact grouping is future work.
+- Complete archaea60 (`+ small_fams`, 31,236 families) no-fm run done (§4b); the with-fm complete-set run is finishing — loss expected to inflate per §5.
+- The AleRax reference is **clade-grouped** (17 rate classes); gpurec's specieswise is free-per-branch + prior. A tight prior approximates grouping but is not identical; matching the exact grouping (so loss is identifiable per-branch) is the clearest next step for improving the loss correlation.
+- Fan-out to the other 9 rooting hypotheses (Asgard, DPANN, TACK, …) not yet run.
 - Comparison currently aligns the 60 **leaf** branches by species name; internal-branch alignment via `_alerax_label_map` is available but not yet wired into the report.
 
 ## 8. Reproduce
