@@ -82,7 +82,7 @@ Adding the 25,790 small (1–3-leaf, mostly single-gene) families — the comple
 | fm = 0 | **+11.7** (pushes L down) | −12.9 (dominates) | −1.2 |
 | fm on (subset) | **−1.7** (pushes L **up**) | +0.4 (flat) | **−1.3 (dominates)** |
 
-The loss-rate gradient **flips sign** when fm is on; the numerator goes flat and the ascertainment denominator drives loss up. (Data *fit* still improves with fm: min NLL 7.6 → −0.9 — it is specifically the inferred *rate* that inflates.) This is the well-known coupling between a sampling correction and inflated rate estimates, present in AleRax's UndatedDTL by construction; gpurec reproduces it.
+The loss-rate gradient **flips sign** when fm is on; the numerator goes flat and the denominator drives loss up. (Data *fit* still improves with fm: min NLL 7.6 → −0.9 — it is specifically the inferred *rate* that inflates.) **Important caveat:** that toy decomposition had fm on *both* `E` and Π. At scale, isolating fm to `E` only (`--fm-mode e-only`, §5.1) does **not** inflate loss — so the E-side ascertainment effect is in fact **negligible here**, and the **Π double-count (§5.1) is the actual driver**.
 
 ### 5.1 Root cause — the AleRax *code* applies fraction-missing to *E only*, not Π
 
@@ -98,7 +98,16 @@ Reading the AleRax source (`github.com/BenoitMorel/AleRax`, `src/ale/UndatedDTLM
 
 **Which is mathematically correct?** **The E-only (code) formulation is the consistent one; the supplement's Π baseline double-counts.** By complementarity, a gene copy at a leaf is either *observed* — it is the singleton clade, mass `p_obs` — or *unobserved* — `E_l = 1 − p_obs`. So the `1 − p_obs` "present-but-unobserved" mass is **already held entirely in `E_l`**, and it flows into Π through the mixed `Π·E` terms (speciation with one extinct child, transfer to an extinct recipient, …). The supplement's `(1−σ)(1−p_obs)` puts that *same* mass a **second time** directly onto Π → a double count, hence the inflation. (Two honest caveats: this is a complementarity argument, not a from-first-principles derivation; and *both* formulations omit a `p_obs` factor on the mapped/observed gene — giving `1`/`p^S` not `p_obs` — so some `p_obs` accounting lives in the conditional normalization. The practical tie-breaker is that the validated, published AleRax computes the E-only version.)
 
-**The fix — `--fm-mode e-only`.** Keep `leaf_E` in the E solver; drop the Π baseline (do not thread `leaf_obs_log` into `Pi_wave_forward`/backward). Implemented by decoupling the E-side `leaf_E` from the Π-side `leaf_obs_log` in `optimize_theta_wave`/`implicit_grad`, exposed as `--fm-mode {off,both,e-only}` (`both` = supplement, unchanged; `e-only` = AleRax-faithful). *[e-only-vs-AleRax numbers to append once the run lands; expected to track the no-fm/AleRax result, since the Π double-count is removed.]*
+**The fix — `--fm-mode e-only`.** Keep `leaf_E` in the E solver; drop the Π baseline (do not thread `leaf_obs_log` into `Pi_wave_forward`/backward). Implemented by decoupling the E-side `leaf_E` from the Π-side `leaf_obs_log` in `optimize_theta_wave`/`implicit_grad`, exposed as `--fm-mode {off,both,e-only}` (`both` = supplement, unchanged; `e-only` = AleRax-faithful).
+
+**Confirmed (Eury, 3,946 ≥4-species families, σ=0.25):** `e-only` removes the inflation entirely — **L median 0.39** vs supplement-mode `both` **17.8** (and no-fm 0.46) — and matches AleRax as well as no-fm: per-branch **D Pearson 0.63**, **T 0.55**, L 0.08 (the free-vs-grouped limit, §7). Since `e-only` (fm in `E`, ascertainment effect included) does **not** inflate while `both` does, the **Π double-count is the sole cause** of the inflation. `--fm-mode e-only` is the AleRax-matching default going forward.
+
+| config | D median | **L median** | T median |
+|---|---|---|---|
+| `off` (no fm) | 0.057 | 0.46 | 0.18 |
+| `both` (supplement) | 0.071 | **17.8** | 0.053 |
+| `e-only` (AleRax code) | 0.054 | **0.39** | 0.154 |
+| AleRax reference | 0.075 | 0.22 | 0.14 |
 
 **Two consequences either way:**
 1. With the supplement's Π term + free per-branch rates, **loss is unidentifiable / runs to the boundary** → must be regularized (the Brownian prior) or constrained.
@@ -113,7 +122,7 @@ Reading the AleRax source (`github.com/BenoitMorel/AleRax`, `src/ale/UndatedDTLM
 
 ## 7. Open / not-yet-resolved
 
-- `--fm-mode e-only` run (the AleRax-faithful fix, §5.1) in flight — expected to track no-fm/AleRax; numbers to append. Complete archaea60 no-fm run done (§4b); with-fm complete-set run still finishing.
+- `--fm-mode e-only` (the AleRax-faithful fix) **confirmed** (§5.1): removes the inflation, matches AleRax (D 0.63 / T 0.55). Complete archaea60 ±fm runs done (§4b).
 - **Why loss doesn't match even without fm:** the AleRax reference is **clade-grouped** (17 rate classes — many leaf branches share one value, several pinned to the `1e-10` floor); gpurec fits a *free* rate per branch. Correlating 60 free values against a handful of grouped/floored ones is structurally capped, and loss is the **least-identifiable axis** (a lost gene leaves no trace, so per-branch loss is weakly constrained — unlike D/T, which leave direct signatures). To match AleRax's loss per-branch you'd impose the **same clade grouping** (17 rate classes), not free-per-branch + a smoothing prior.
 - Fan-out to the other 9 rooting hypotheses (Asgard, DPANN, TACK, …) not yet run.
 - Comparison currently aligns the 60 **leaf** branches by species name; internal-branch alignment via `_alerax_label_map` is available but not yet wired into the report.
