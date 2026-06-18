@@ -18,14 +18,31 @@ NEG_INF = float("-inf")
 # =========================================================================
 
 def E_step(E, sp_P_idx, sp_child12_idx, log_pS, log_pD, log_pL, transfer_mat, max_transfer_mat, pibar_mode='dense',
-           ancestors_T=None):
-    """E can either have shape [S] or [N_genes, S]. Likewise, transfer_mat can have shape [S, S] or [N_genes, S, S]."""
+           ancestors_T=None, leaf_E=None):
+    """E can either have shape [S] or [N_genes, S]. Likewise, transfer_mat can have shape [S, S] or [N_genes, S, S].
+
+    ``leaf_E`` (optional, shape [S]) is the per-species leaf extinction boundary
+    in log2 space, i.e. ``log2(1 - p_obs_l)`` = ``log2(fraction_missing_l)``, with
+    ``-inf`` for internal species and fully-observed leaves. It implements the
+    UndatedDTL "fraction missing" term (AleRaxSupp.tex §extinction): at a species
+    leaf ``l`` the terminal speciation contribution is ``p^S_l * E_l`` with
+    ``E_l = 1 - p_obs_l``. By default (``None``) every gene is observed.
+    """
     E_stack = torch.empty((4, *E.shape), dtype=E.dtype, device=E.device)
     # S
     E_s12 = gather_E_children(E, sp_P_idx, sp_child12_idx)
     E_s1, E_s2 = torch.chunk(E_s12, 2, dim=-1)  # Each [N_genes*S]
     E_s1 = E_s1.view(E.shape) # should broadcast correctly when E has shape [S] or [N_genes, S]
     E_s2 = E_s2.view(E.shape) # should broadcast correctly when E has shape [S] or [N_genes, S]
+    if leaf_E is not None:
+        # Fraction-missing: at species leaf l the terminal speciation term is the
+        # SINGLE factor p^S_l * E_l (not E_f * E_g). Realize it as
+        # E_s1 = log2(E_l), E_s2 = log2(1) = 0, masked to the missing leaves.
+        # leaf_E is -inf at internal/fully-observed species, so the mask is false
+        # there and the normal two-child recursion is left untouched.
+        _missing = leaf_E > NEG_INF
+        E_s1 = torch.where(_missing, leaf_E.to(dtype=E_s1.dtype), E_s1)
+        E_s2 = torch.where(_missing, torch.zeros((), dtype=E_s2.dtype, device=E_s2.device), E_s2)
     # should broadcast correctly when log_pS is [S] and log_pD is [S]
     # or if log_pS is [N_genes, S] and log_pD is [N_genes, S]
     # Align parameter tensors to broadcast with E
@@ -95,7 +112,8 @@ def E_fixed_point(species_helpers,
                           dtype,
                           device,
                           pibar_mode='dense',
-                          ancestors_T=None):
+                          ancestors_T=None,
+                          leaf_E=None):
 
     S = species_helpers['S']
     # Determine batch size from parameters if present
@@ -140,6 +158,7 @@ def E_fixed_point(species_helpers,
                     max_transfer_mat=max_transfer_mat,
                     pibar_mode=pibar_mode,
                     ancestors_T=ancestors_T,
+                    leaf_E=leaf_E,
                 )
                 
                 E_new, E_s1, E_s2, E_bar = result

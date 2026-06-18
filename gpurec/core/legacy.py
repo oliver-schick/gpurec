@@ -116,12 +116,27 @@ def Pi_fixed_point(
     warm_start_Pi,
     device,
     dtype,
+    leaf_obs_log=None,
+    leaf_species_mask=None,
 ):
-    """Fixed-point solver for Pi using leaf mapping indices and current event params."""
+    """Fixed-point solver for Pi using leaf mapping indices and current event params.
+
+    ``leaf_obs_log`` (optional, [S]) = ``log2(1 - p_obs_l)`` = ``log2(fraction_missing_l)``
+    and ``leaf_species_mask`` (optional, [S] bool) mark the species-tree leaves.
+    Together they implement the fraction-missing leaf boundary
+    ``Pi_{l,gamma} = sigma + (1-sigma)(1 - p_obs_l)`` (AleRaxSupp.tex). By default
+    (both ``None``) ``Pi_{l,gamma} = sigma`` (every gene observed).
+    """
     C = int(ccp_helpers['C'])
     S = int(species_helpers['S'])
 
     clade_species_map = torch.full((C, S), NEG_INF, device=device, dtype=dtype)
+    if leaf_obs_log is not None and leaf_species_mask is not None:
+        # sigma=0 baseline at species-leaf columns: a clade that does not map to
+        # leaf l is still present-but-unobserved with prob 1-p_obs_l. The sigma=1
+        # (mapped leaf-clade) entries are overwritten to log2(1)=0 just below.
+        lm = leaf_species_mask.to(device)
+        clade_species_map[:, lm] = leaf_obs_log.to(device=device, dtype=dtype)[lm]
     clade_species_map[leaf_row_index.to(device), leaf_col_index.to(device)] = 0.0
 
     if warm_start_Pi is not None:
