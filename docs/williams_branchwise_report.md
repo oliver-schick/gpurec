@@ -1,7 +1,7 @@
 # Replicating AleRax branch-wise DTL rates with gpurec on Williams et al. 2017
 
 **Status:** branch `cpp-rust-free`. Runs on OIST Saion (A100; torch 2.6.0+cu124, triton 3.2.0, gcc 11.2.1).
-**TL;DR:** **without** fraction-missing, gpurec recovers AleRax's per-branch **duplication and transfer** rates (per-branch Pearson ~0.55–0.58 on log-rates, medians within ~15–65%); **loss is not recovered per-branch** (Pearson ~0.04) — the expected limit of free-per-branch gpurec vs AleRax's clade-*grouped* reference. The fraction-missing implementation is **faithful to the AleRax supplement (no sign / `1-x` error)**, but enabling it **inflates the inferred loss rate** — a real, expected consequence of the observability/ascertainment denominator in the UndatedDTL likelihood, *not* a bug. The open question is whether AleRax behaves identically; **this needs an AleRax run to confirm (see §6, "For Oliver").**
+**TL;DR:** **without** fraction-missing, gpurec recovers AleRax's per-branch **duplication and transfer** rates (per-branch Pearson ~0.55–0.58 on log-rates, medians within ~15–65%); **loss is not recovered per-branch** (Pearson ~0.04) — the expected limit of free-per-branch gpurec vs AleRax's clade-*grouped* reference. gpurec's fraction-missing is **faithful to the AleRax supplement (no sign / `1-x` error)** — but **the supplement (L159) is itself inconsistent with the AleRax code**: AleRax applies fraction-missing to the **extinction `E` only**, never to the Π reconciliation. The supplement's extra Π term `(1−σ)(1−p_obs)` **double-counts** the present-but-unobserved mass already held in `E`, and that is what **inflates the inferred loss rate**. Fix: `--fm-mode e-only` (E-only, AleRax-faithful) — keeps `leaf_E` in `E`, drops the Π baseline (§5.1).
 
 ---
 
@@ -84,23 +84,37 @@ Adding the 25,790 small (1–3-leaf, mostly single-gene) families — the comple
 
 The loss-rate gradient **flips sign** when fm is on; the numerator goes flat and the ascertainment denominator drives loss up. (Data *fit* still improves with fm: min NLL 7.6 → −0.9 — it is specifically the inferred *rate* that inflates.) This is the well-known coupling between a sampling correction and inflated rate estimates, present in AleRax's UndatedDTL by construction; gpurec reproduces it.
 
-**Two consequences:**
-1. With fm, **free per-branch loss is unidentifiable / runs to the boundary** → it *must* be regularized (the Brownian prior) or constrained. This is the real justification for the prior.
-2. gpurec **without** fm matches the reference → **the AleRax `branch wise` reference was evidently run with `p_obs=1` (no fraction-missing)**. There is no fm-enabled AleRax reference in the dataset, so comparing gpurec-*with*-fm to it is apples-to-oranges.
+### 5.1 Root cause — the AleRax *code* applies fraction-missing to *E only*, not Π
 
-## 6. ⚠️ For Oliver — please run AleRax to settle this
+Reading the AleRax source (`github.com/BenoitMorel/AleRax`, `src/ale/UndatedDTLMultiModel.hpp`) resolves it. `_fm` (the fraction-missing vector) is used in **exactly one place** — the extinction recursion (`_PS[ec] * _fm[e]`, the "S but not observed" term). The Π (`uq`) reconciliation recursion does **not** use `_fm`: its leaf boundary is just `proba += _PS[ec]` at the mapped gene-leaf, with **no `(1−σ)(1−p_obs)` baseline**.
 
-We cannot tell from the committed reference files whether AleRax used fraction-missing, and there is no AleRax binary in this repo to check. **Please run AleRax (UndatedDTL, PER-SPECIES / branch-wise) on the Williams `Eury` data (the ≥4-species families) twice:**
+| | extinction `E_l` | Π leaf boundary |
+|---|---|---|
+| AleRaxSupp.tex | `1−p_obs` (L116) | `σ + (1−σ)(1−p_obs)` (L159) |
+| AleRax **code** | `_fm[e]` ✓ same | **`σ·p^S` only — no `(1−p_obs)` term** |
+| gpurec (followed the supplement) | ✓ same | `σ·p^S + (1−σ)·p^S·(1−p_obs)` ← **extra term** |
 
-1. **Without** fraction-missing (`p_obs=1`) → should reproduce the existing `branch wise/Eury/model_parameters.txt`. This confirms the published reference's config.
-2. **With** the `Williams_et_al_2017/fraction_missing` file (per-species `perSpeciesMissing`) → **does AleRax's inferred loss also inflate?**
+**The supplement (L159) is inconsistent with the AleRax code.** gpurec faithfully implemented the *supplement*, so it carries an **extra Π leaf-boundary term that AleRax does not have** — adding "present-but-unobserved" mass to every clade at every leaf. That extra term, on top of the (shared) E-side ascertainment effect of §5, is what drives gpurec's loss inflation beyond anything AleRax would show.
 
-If AleRax-with-fm *also* inflates loss, gpurec is faithful to AleRax (and the inflation is an intrinsic property of the model + ascertainment correction — worth a methods note). If AleRax-with-fm does **not** inflate loss, then AleRax handles the observation term differently from the supplement as we read it, and we need to find where. Either way, this AleRax run is the missing piece.
+**Which is mathematically correct?** **The E-only (code) formulation is the consistent one; the supplement's Π baseline double-counts.** By complementarity, a gene copy at a leaf is either *observed* — it is the singleton clade, mass `p_obs` — or *unobserved* — `E_l = 1 − p_obs`. So the `1 − p_obs` "present-but-unobserved" mass is **already held entirely in `E_l`**, and it flows into Π through the mixed `Π·E` terms (speciation with one extinct child, transfer to an extinct recipient, …). The supplement's `(1−σ)(1−p_obs)` puts that *same* mass a **second time** directly onto Π → a double count, hence the inflation. (Two honest caveats: this is a complementarity argument, not a from-first-principles derivation; and *both* formulations omit a `p_obs` factor on the mapped/observed gene — giving `1`/`p^S` not `p_obs` — so some `p_obs` accounting lives in the conditional normalization. The practical tie-breaker is that the validated, published AleRax computes the E-only version.)
+
+**The fix — `--fm-mode e-only`.** Keep `leaf_E` in the E solver; drop the Π baseline (do not thread `leaf_obs_log` into `Pi_wave_forward`/backward). Implemented by decoupling the E-side `leaf_E` from the Π-side `leaf_obs_log` in `optimize_theta_wave`/`implicit_grad`, exposed as `--fm-mode {off,both,e-only}` (`both` = supplement, unchanged; `e-only` = AleRax-faithful). *[e-only-vs-AleRax numbers to append once the run lands; expected to track the no-fm/AleRax result, since the Π double-count is removed.]*
+
+**Two consequences either way:**
+1. With the supplement's Π term + free per-branch rates, **loss is unidentifiable / runs to the boundary** → must be regularized (the Brownian prior) or constrained.
+2. gpurec **without** fm — and, expected, with `--fm-mode e-only` — matches the reference, consistent with the committed `branch wise/Eury` reference being produced under the AleRax (E-only) formulation with `p_obs=1`.
+
+## 6. Status of the AleRax question (largely resolved)
+
+**The cause is the supplement↔code discrepancy in the Π leaf boundary (§5.1):** AleRax applies fraction-missing to the extinction `E` only; gpurec (following the supplement) also applied it to Π, a double count. `--fm-mode e-only` makes gpurec match the AleRax *code*. Remaining confirmation, for Oliver / Benoit / Noah:
+
+1. **Confirm intent:** is `AleRaxSupp.tex` L159's `(1−σ)(1−p_obs)` a documentation typo (it should not be in Π), or is the code missing a term? The complementarity argument (§5.1) and the validated AleRax behavior both point to the supplement being wrong; the model's authors should confirm.
+2. **(Optional) cross-check:** run AleRax branch-wise on Williams `Eury` with the `fraction_missing` file and verify it matches gpurec `--fm-mode e-only` (apples-to-apples), and that the committed reference was `p_obs=1`.
 
 ## 7. Open / not-yet-resolved
 
-- Complete archaea60 (`+ small_fams`, 31,236 families) no-fm run done (§4b); the with-fm complete-set run is finishing — loss expected to inflate per §5.
-- The AleRax reference is **clade-grouped** (17 rate classes); gpurec's specieswise is free-per-branch + prior. A tight prior approximates grouping but is not identical; matching the exact grouping (so loss is identifiable per-branch) is the clearest next step for improving the loss correlation.
+- `--fm-mode e-only` run (the AleRax-faithful fix, §5.1) in flight — expected to track no-fm/AleRax; numbers to append. Complete archaea60 no-fm run done (§4b); with-fm complete-set run still finishing.
+- **Why loss doesn't match even without fm:** the AleRax reference is **clade-grouped** (17 rate classes — many leaf branches share one value, several pinned to the `1e-10` floor); gpurec fits a *free* rate per branch. Correlating 60 free values against a handful of grouped/floored ones is structurally capped, and loss is the **least-identifiable axis** (a lost gene leaves no trace, so per-branch loss is weakly constrained — unlike D/T, which leave direct signatures). To match AleRax's loss per-branch you'd impose the **same clade grouping** (17 rate classes), not free-per-branch + a smoothing prior.
 - Fan-out to the other 9 rooting hypotheses (Asgard, DPANN, TACK, …) not yet run.
 - Comparison currently aligns the 60 **leaf** branches by species name; internal-branch alignment via `_alerax_label_map` is available but not yet wired into the report.
 

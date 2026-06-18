@@ -530,26 +530,48 @@ def _run(args, data_dir: Path):
         species_helpers["Recipients_mat"]
     ).max(dim=-1).values.to(device=device, dtype=dtype)
 
-    # 4. fraction-missing leaf boundary.
+    # 4. fraction-missing boundary, decoupled into the E (extinction) side
+    #    (leaf_E) and the Pi (reconciliation) leaf side (leaf_obs_log).
+    #
+    #    fm_mode:
+    #      'off'    -> leaf_E=None, leaf_obs_log=None (no fraction-missing anywhere).
+    #      'both'   -> leaf_E set, leaf_obs_log=leaf_E (AleRax *supplement*: extra
+    #                  Pi baseline as well as the E extinction term).
+    #      'e-only' -> leaf_E set, leaf_obs_log=None (AleRax *source*-faithful: _fm
+    #                  in the extinction recursion only, NO extra Pi baseline).
+    #
+    #    leaf_obs_log uses the explicit-None sentinel of optimize_theta_wave: in
+    #    'e-only' we pass leaf_obs_log=None to force the Pi boundary OFF; in 'both'
+    #    we pass leaf_obs_log=leaf_E. (We never leave it unset, so behavior is
+    #    explicit regardless of the kwarg default.)
     leaf_E = None
-    fm_info = {"enabled": False}
-    if args.no_fraction_missing:
-        print(f"[4/5] fraction-missing DISABLED (--no-fraction-missing)", flush=True)
+    leaf_obs_log = None
+    fm_info = {"enabled": False, "fm_mode": args.fm_mode}
+    if args.fm_mode == "off":
+        print(f"[4/5] fraction-missing DISABLED (fm-mode=off)", flush=True)
     elif not fm_path.exists():
         print(f"[4/5] [warn] fraction_missing not found ({fm_path}); "
-              f"proceeding WITHOUT it.", flush=True)
+              f"proceeding WITHOUT it (fm-mode={args.fm_mode}).", flush=True)
+        fm_info = {"enabled": False, "fm_mode": args.fm_mode,
+                   "note": "fraction_missing file not found"}
     else:
         fm, n_set, fm_skipped = _parse_fraction_missing(fm_path, sp_name_to_idx, S)
         leaf_E_cpu, leaf_mask = _build_leaf_E(species_helpers, fm, S, dtype)
         leaf_E = leaf_E_cpu.to(device=device, dtype=dtype)
         n_missing = int(torch.isfinite(leaf_E).sum().item())
+        # Pi leaf boundary: same tensor in 'both', dropped in 'e-only'.
+        leaf_obs_log = leaf_E if args.fm_mode == "both" else None
         fm_info = {
             "enabled": True,
+            "fm_mode": args.fm_mode,
+            "applied_to_E": True,
+            "applied_to_Pi": args.fm_mode == "both",
             "rows_mapped": n_set,
             "leaves_with_fraction": n_missing,
             "skipped_rows": fm_skipped,
         }
-        print(f"[4/5] fraction-missing ENABLED: {n_set} rows mapped, "
+        _pi_note = "E+Pi (supplement)" if args.fm_mode == "both" else "E only (AleRax-faithful)"
+        print(f"[4/5] fraction-missing ENABLED [{_pi_note}]: {n_set} rows mapped, "
               f"{n_missing} leaves with fraction>0", flush=True)
         if fm_skipped:
             print(f"      [warn] {len(fm_skipped)} rows for species absent from "
@@ -593,7 +615,8 @@ def _run(args, data_dir: Path):
 
     print(f"[5/5] Optimizing specieswise theta [S={S},3]  "
           f"(init-rate={args.init_rate}, optimizer={args.optimizer}, "
-          f"pibar={args.pibar_mode}, dtype={args.dtype}, steps={args.steps}) ...",
+          f"pibar={args.pibar_mode}, dtype={args.dtype}, steps={args.steps}, "
+          f"fm-mode={args.fm_mode}) ...",
           flush=True)
     if args.prior == "brownian":
         print(f"      prior=brownian  sigma={brownian_sigma} (all axes, log2)  "
@@ -620,6 +643,7 @@ def _run(args, data_dir: Path):
         device=device,
         dtype=dtype,
         leaf_E=leaf_E,
+        leaf_obs_log=leaf_obs_log,
         verbose=True,
         brownian_sigma=brownian_sigma,
         brownian_root_sigma=brownian_root_sigma,
@@ -674,6 +698,7 @@ def _run(args, data_dir: Path):
         "pibar_mode": args.pibar_mode,
         "steps": args.steps,
         "dtype": args.dtype,
+        "fm_mode": args.fm_mode,
         "fraction_missing": fm_info,
         "prior": prior_info,
         "bounds": bounds_info,
@@ -723,7 +748,18 @@ def _parse_args(argv=None):
                    help="Initial rate for all D,L,T (natural space); theta_init "
                         "= log2(init_rate). Default: 0.1")
     p.add_argument("--no-fraction-missing", action="store_true",
-                   help="Disable the fraction-missing leaf boundary (leaf_E=None)")
+                   help="Disable the fraction-missing leaf boundary entirely "
+                        "(equivalent to --fm-mode off; overrides --fm-mode).")
+    p.add_argument("--fm-mode", default="both", choices=["both", "e-only", "off"],
+                   help="How to apply the fraction-missing boundary. "
+                        "'both' (default): apply in BOTH the E (extinction) solve "
+                        "and the Pi (reconciliation) leaf boundary -- the AleRax "
+                        "*supplement* behavior (leaf_E set, leaf_obs_log=leaf_E). "
+                        "'e-only': apply in the E solve ONLY, drop the extra Pi "
+                        "baseline -- AleRax *source*-faithful (leaf_E set, "
+                        "leaf_obs_log=None). 'off': disable everywhere "
+                        "(leaf_E=None, leaf_obs_log=None). "
+                        "--no-fraction-missing forces 'off'.")
     p.add_argument("--prior", default="none", choices=["none", "brownian"],
                    help="Rate prior: 'none' (free per-branch) or 'brownian' "
                         "(time-uniform TKP relaxed clock coupling adjacent "
@@ -747,6 +783,9 @@ def _parse_args(argv=None):
                    help="Parse tree + sample .ale, report wiring, and EXIT "
                         "(no optimization, runs without CUDA/Triton)")
     args = p.parse_args(argv)
+    # --no-fraction-missing is a legacy alias for --fm-mode off (and overrides it).
+    if args.no_fraction_missing:
+        args.fm_mode = "off"
     if args.out is None:
         args.out = f"results/williams_{args.root}_branchwise.rates.txt"
     return args

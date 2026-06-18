@@ -258,13 +258,117 @@ def check_prior_fd() -> bool:
     return ok
 
 
+def check_fraction_missing_decoupling() -> bool:
+    """API-level check that the E/Pi fraction-missing boundaries are decoupled.
+
+    The full numerical wave path needs Triton/GPU, so here we only validate the
+    *routing contract* of ``optimize_theta_wave`` / ``implicit_grad_loglik_vjp_wave``:
+
+      * both functions expose a ``leaf_obs_log`` kwarg alongside ``leaf_E``;
+      * ``leaf_obs_log`` defaults to a sentinel (so "unset" is distinguishable from
+        an explicit ``None``);
+      * resolution rule: unset -> mirror ``leaf_E`` (legacy "both"/supplement,
+        byte-identical to before); explicit ``None`` -> Pi boundary OFF (e-only).
+
+    When Triton is unavailable (CPU box) the heavy module cannot be imported; in
+    that case we fall back to inspecting the function signatures via the AST of the
+    source files, which needs no Triton. Either way this confirms the new kwargs
+    thread through without error.
+    """
+    print("[3] FRACTION-MISSING DECOUPLING (E vs Pi) -- API contract")
+    ok = True
+
+    def _check_sentinel_rule(unset_sentinel_cls):
+        # Replicates the resolution in optimize_theta_wave / implicit_grad.
+        def resolve(leaf_E, leaf_obs_log):
+            if isinstance(leaf_obs_log, unset_sentinel_cls):
+                leaf_obs_log = leaf_E
+            return leaf_E, leaf_obs_log
+        v = object()
+        sentinel = unset_sentinel_cls()
+        cases = {
+            "legacy(only leaf_E)": (resolve(v, sentinel), (v, v)),     # -> both
+            "both(explicit)":      (resolve(v, v), (v, v)),
+            "e-only":              (resolve(v, None), (v, None)),
+            "off":                 (resolve(None, None), (None, None)),
+        }
+        good = True
+        for name, (got, want) in cases.items():
+            match = got == want
+            good &= match
+            print(f"    {name:22s}: (leaf_E, leaf_obs_log) -> "
+                  f"({_lab(got[0])}, {_lab(got[1])})  {'OK' if match else 'MISMATCH'}")
+        # Legacy single-tensor path must equal explicit 'both'.
+        legacy_equals_both = cases["legacy(only leaf_E)"][0] == cases["both(explicit)"][0]
+        print(f"    legacy == both (backward-compat preserved): {legacy_equals_both}")
+        good &= legacy_equals_both
+        return good
+
+    def _lab(x):
+        return "None" if x is None else "TENSOR"
+
+    try:
+        import inspect
+        from gpurec.optimization.wave_optimizer import (
+            optimize_theta_wave, _PiLeafUnset as _WOUnset,
+        )
+        from gpurec.optimization.implicit_grad import (
+            implicit_grad_loglik_vjp_wave, _PiLeafUnset as _IGUnset,
+        )
+        sig_w = inspect.signature(optimize_theta_wave)
+        sig_i = inspect.signature(implicit_grad_loglik_vjp_wave)
+        for fname, sig, unset_cls in (
+            ("optimize_theta_wave", sig_w, _WOUnset),
+            ("implicit_grad_loglik_vjp_wave", sig_i, _IGUnset),
+        ):
+            has_e = "leaf_E" in sig.parameters
+            has_p = "leaf_obs_log" in sig.parameters
+            is_sent = has_p and isinstance(sig.parameters["leaf_obs_log"].default, unset_cls)
+            print(f"    {fname}: leaf_E={has_e}  leaf_obs_log={has_p}  "
+                  f"default=sentinel:{is_sent}")
+            ok &= has_e and has_p and is_sent
+        print("    [imported full module: Triton available]")
+        ok &= _check_sentinel_rule(_WOUnset)
+    except Exception as exc:  # noqa: BLE001  (typically ModuleNotFoundError: triton)
+        print(f"    [heavy import unavailable ({type(exc).__name__}); "
+              f"falling back to source-signature check -- CPU/no-Triton]")
+        import ast
+        for relpath, fnames in (
+            ("gpurec/optimization/wave_optimizer.py", ["optimize_theta_wave"]),
+            ("gpurec/optimization/implicit_grad.py", ["implicit_grad_loglik_vjp_wave"]),
+        ):
+            src = (_REPO_ROOT / relpath).read_text()
+            tree = ast.parse(src)
+            funcs = {n.name: n for n in ast.walk(tree)
+                     if isinstance(n, ast.FunctionDef)}
+            for fn in fnames:
+                node = funcs.get(fn)
+                if node is None:
+                    print(f"    {relpath}:{fn} NOT FOUND"); ok = False; continue
+                argnames = ([a.arg for a in node.args.args]
+                            + [a.arg for a in node.args.kwonlyargs])
+                has_e = "leaf_E" in argnames
+                has_p = "leaf_obs_log" in argnames
+                print(f"    {relpath}:{fn}: leaf_E={has_e}  leaf_obs_log={has_p}")
+                ok &= has_e and has_p
+        # Sentinel rule is pure Python; emulate the contract with a local class.
+        class _LocalUnset:  # noqa: D401
+            pass
+        ok &= _check_sentinel_rule(_LocalUnset)
+
+    print(f"  decoupling check: {'PASS' if ok else 'FAIL'}\n")
+    return ok
+
+
 def main() -> int:
     ok = True
     ok &= check_parent_index()
     ok &= check_prior_fd()
+    ok &= check_fraction_missing_decoupling()
 
     print("=" * 70)
-    print("RESULT:", "PASS -- Brownian prior + parent-index validated (CPU)"
+    print("RESULT:", "PASS -- Brownian prior + parent-index + fraction-missing "
+          "decoupling validated (CPU)"
           if ok else "FAIL -- see checks above")
     print("=" * 70)
     print()

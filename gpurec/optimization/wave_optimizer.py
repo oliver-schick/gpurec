@@ -32,6 +32,23 @@ def _cuda_mem_diag(device) -> str:
         return f"mem_diag_unavailable({exc})"
 
 
+class _PiLeafUnset:
+    """Sentinel: caller did NOT pass ``leaf_obs_log`` at all.
+
+    Lets ``optimize_theta_wave`` distinguish two cases that both want a Python
+    ``None`` at the call boundary:
+
+    * ``leaf_obs_log`` unset (this sentinel) -> default it to ``leaf_E`` so legacy
+      callers that pass only ``leaf_E`` keep the "both" (supplement) behavior,
+      byte-identical to before.
+    * ``leaf_obs_log=None`` passed explicitly -> Pi leaf boundary OFF (the
+      AleRax-faithful "e-only" mode), independent of ``leaf_E``.
+    """
+
+
+_PI_LEAF_UNSET = _PiLeafUnset()
+
+
 def optimize_theta_wave(
     wave_layout,
     species_helpers,
@@ -64,6 +81,7 @@ def optimize_theta_wave(
     momentum: float = 0.9,
     verbose: bool = False,
     leaf_E: torch.Tensor | None = None,
+    leaf_obs_log=_PI_LEAF_UNSET,
     brownian_sigma=None,
     brownian_root_sigma: float = 5.0,
     brownian_mu=None,
@@ -107,12 +125,26 @@ def optimize_theta_wave(
     momentum : float
         Momentum for SGD (default 0.9, ignored for adam/lbfgs).
     leaf_E : Tensor [S] | None
-        Optional fraction-missing leaf boundary, log2(1 - p_obs_l) = log2(fraction
-        missing) at missing species-leaves and -inf elsewhere. A single [S] tensor
-        serves BOTH the E extinction boundary (passed as leaf_E to E_fixed_point and
-        the E adjoint E_steps) and the Pi leaf boundary (passed as leaf_obs_log to
-        Pi_wave_forward / backward), since they are identical. None (default) ->
-        every gene observed (byte-identical to before).
+        Optional fraction-missing boundary, log2(1 - p_obs_l) = log2(fraction
+        missing) at missing species-leaves and -inf elsewhere, applied to the E
+        (extinction) solve ONLY: passed as leaf_E to E_fixed_point and to the E
+        adjoint E_steps. This is the AleRax ``_fm`` term (the "S but not observed"
+        extinction contribution). None (default) -> every gene observed in the E
+        recursion (byte-identical to before).
+    leaf_obs_log : Tensor [S] | None
+        Optional fraction-missing boundary applied to the Pi (reconciliation) leaf
+        boundary ONLY: passed as leaf_obs_log to Pi_wave_forward / Pi_wave_backward.
+        This is the EXTRA ``(1-sigma)(1-p_obs)`` Pi baseline from the AleRax
+        *supplement* (AleRaxSupp.tex L159) which the AleRax *source* does NOT apply.
+        Decoupled from ``leaf_E`` so an AleRax-faithful run can keep fraction-missing
+        in E while dropping it from Pi.
+
+        Backward-compat: if ``leaf_obs_log`` is None but ``leaf_E`` is set, it
+        defaults to ``leaf_E`` so callers passing only ``leaf_E`` get the previous
+        "both" (supplement) behavior, byte-identical to before. To get the
+        AleRax-faithful "E-only" mode, pass ``leaf_obs_log=None`` explicitly via the
+        sentinel (see ``_PiLeafUnset`` below) — i.e. set ``leaf_E`` and leave the Pi
+        boundary off. The driver exposes this through ``--fm-mode e-only``.
     brownian_sigma : float | Tensor [3] | None
         Std (log2 units) of the time-uniform TKP Brownian rate prior coupling
         adjacent branches' log-rates. None (default) disables the prior and keeps
@@ -139,6 +171,14 @@ def optimize_theta_wave(
     """
     if device is None:
         device = theta_init.device
+
+    # Resolve the Pi leaf boundary. Backward-compat: if the caller did NOT pass
+    # ``leaf_obs_log`` at all, default it to ``leaf_E`` so the legacy single-tensor
+    # path (fraction-missing in BOTH E and Pi, the supplement behavior) is
+    # byte-identical to before. An explicit ``leaf_obs_log=None`` turns the Pi leaf
+    # boundary OFF (AleRax-faithful "e-only"), independent of ``leaf_E``.
+    if isinstance(leaf_obs_log, _PiLeafUnset):
+        leaf_obs_log = leaf_E
 
     _THETA_MIN = math.log2(1e-10)
 
@@ -356,7 +396,7 @@ def optimize_theta_wave(
                         log_pS=log_pS, log_pD=log_pD, log_pL=log_pL,
                         transfer_mat=transfer_mat, max_transfer_mat=mt,
                         device=device, dtype=dtype, pibar_mode=pibar_mode,
-                        leaf_obs_log=leaf_E,
+                        leaf_obs_log=leaf_obs_log,
                     )
                     logL_b = compute_log_likelihood(Pi_out_b['Pi'], E_out['E'], roots_b)
                     nll += float(logL_b.sum().item())
@@ -401,6 +441,7 @@ def optimize_theta_wave(
                         transfer_mat_unnormalized=transfer_mat_unnormalized,
                         ancestors_T=_ancestors_T,
                         leaf_E=leaf_E,
+                        leaf_obs_log=leaf_obs_log,
                     )
                 except torch.OutOfMemoryError as exc:
                     raise torch.OutOfMemoryError(
@@ -575,6 +616,7 @@ def optimize_theta_wave(
                     optimizer='lbfgs',
                     verbose=verbose,
                     leaf_E=leaf_E,
+                    leaf_obs_log=leaf_obs_log,
                     brownian_sigma=brownian_sigma,
                     brownian_root_sigma=brownian_root_sigma,
                     # Pass the RESOLVED root-anchor centre (not None) so the

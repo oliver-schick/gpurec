@@ -17,6 +17,19 @@ from gpurec.core.extract_parameters import extract_parameters, extract_parameter
 from .linear_solvers import _cg, _gmres
 
 
+class _PiLeafUnset:
+    """Sentinel: caller did NOT pass ``leaf_obs_log`` to the implicit-grad VJP.
+
+    Lets us distinguish "default the Pi backward boundary to ``leaf_E``" (legacy
+    single-tensor / supplement behavior, byte-identical to before) from an explicit
+    ``leaf_obs_log=None`` that turns the Pi backward leaf boundary OFF
+    (AleRax-faithful "e-only"), independent of the E adjoint's ``leaf_E``.
+    """
+
+
+_PI_LEAF_UNSET = _PiLeafUnset()
+
+
 @torch.no_grad()
 def implicit_grad_loglik_vjp_wave(
     wave_layout,
@@ -50,6 +63,7 @@ def implicit_grad_loglik_vjp_wave(
     ancestors_T: Optional[torch.Tensor] = None,
     uniform_pibar_row_max: Optional[torch.Tensor] = None,
     leaf_E: Optional[torch.Tensor] = None,
+    leaf_obs_log=_PI_LEAF_UNSET,
 ):
     """Compute ∇θ logL using wave-decomposed backward pass + E adjoint.
 
@@ -58,8 +72,23 @@ def implicit_grad_loglik_vjp_wave(
     2. E adjoint: solve (I - G_E^T) w = q via CG/GMRES
     3. θ gradient: VJP through extract_parameters
 
+    ``leaf_E`` is the fraction-missing boundary for the E (extinction) adjoint
+    ONLY: it is threaded into the ``E_step`` calls in ``_e_adjoint_and_theta_vjp``.
+    ``leaf_obs_log`` is the fraction-missing boundary for the Pi (reconciliation)
+    backward leaf boundary ONLY: it is forwarded to ``Pi_wave_backward``. They are
+    decoupled so an AleRax-faithful run can keep fraction-missing in E while
+    dropping the supplement's extra Pi baseline.
+
+    Backward-compat: if ``leaf_obs_log`` is left at its sentinel default (caller did
+    not pass it), it defaults to ``leaf_E`` so existing callers that pass only
+    ``leaf_E`` keep the previous "both" behavior, byte-identical to before. An
+    explicit ``leaf_obs_log=None`` turns the Pi backward boundary off.
+
     Returns (grad_theta, pi_backward_info).
     """
+    # Backward-compat: unset leaf_obs_log -> mirror leaf_E (legacy "both" behavior).
+    if isinstance(leaf_obs_log, _PiLeafUnset):
+        leaf_obs_log = leaf_E
     # --- Step 1: Pi backward (can be pre-computed for batched mode) ---
     torch.cuda.synchronize()
     _t_pi_bwd_0 = time.perf_counter()
@@ -80,7 +109,7 @@ def implicit_grad_loglik_vjp_wave(
         transfer_mat=transfer_mat,
         ancestors_T=ancestors_T,
         uniform_pibar_row_max=uniform_pibar_row_max,
-        leaf_obs_log=leaf_E,
+        leaf_obs_log=leaf_obs_log,
     )
     torch.cuda.synchronize()
     _t_pi_bwd = time.perf_counter() - _t_pi_bwd_0
@@ -118,9 +147,13 @@ def _e_adjoint_and_theta_vjp(
     """E adjoint solve + theta VJP from pre-computed Pi backward result.
 
     ``leaf_E`` (optional [S]) is the fraction-missing leaf extinction boundary
-    ``log2(1 - p_obs_l)``. It MUST be threaded into every ``E_step`` call below so
-    the (I - G_E^T) operator and the theta->E VJP use the same fixed-point map as
-    the forward E solve; otherwise the E adjoint gradient is inconsistent.
+    ``log2(1 - p_obs_l)`` for the E (extinction) side ONLY. It MUST be threaded into
+    every ``E_step`` call below so the (I - G_E^T) operator and the theta->E VJP use
+    the same fixed-point map as the forward E solve; otherwise the E adjoint
+    gradient is inconsistent. The Pi (reconciliation) leaf boundary
+    (``leaf_obs_log``) is decoupled and handled by the caller
+    (``implicit_grad_loglik_vjp_wave`` -> ``Pi_wave_backward``); it is intentionally
+    NOT used here, since this function performs no Pi backward pass.
 
     Takes pi_bwd dict (from Pi_wave_backward) and completes the gradient
     computation through E adjoint solve and extract_parameters VJP.
