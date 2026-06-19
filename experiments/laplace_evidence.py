@@ -187,10 +187,7 @@ def main():
 
     tp0 = param0()
     k = tp0.numel()
-    if k > args.max_full_k:
-        raise SystemExit(
-            f"k={k} > max-full-k={args.max_full_k}: full-Hessian finite diff is too "
-            f"expensive ({2*k} solves). Use the Lanczos variant for this model.")
+    # (k > max-full-k is handled below by the Lanczos+SLQ branch, not an abort.)
 
     warm = [None]
 
