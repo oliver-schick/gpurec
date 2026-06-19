@@ -2,16 +2,17 @@
 (This_study / "Undine C60", ~257 taxa, 15 candidate roots), driven by gpurec's
 specieswise wave optimizer.
 
-This is the UFBOOT analogue of ``run_williams_branchwise.py``. Williams ships
-pre-built ALEobserve ``.ale`` CCPs; This_study ships per-family **UFBoot
-bootstrap tree samples** (``3_UFBOOTs/*.ufboot``) instead. gpurec's C++
-amalgamator builds the CCP directly from a multi-tree sample
-(``preprocess_multiple_families(tree, {fam: [ufboot]})`` ->
-``amalgamate_clades_and_splits`` which "handles single-tree or multi-tree CCP"),
-so NO ALEobserve step is needed. Everything downstream of family-building (wave
-layout, fraction-missing, Brownian prior, origination, the specieswise wave
-optimize, the output format) is shared with the Williams driver and imported
-from it, so the two stay in lock-step.
+This is the big-tree analogue of ``run_williams_branchwise.py``. This_study
+ships per-family **UFBoot bootstrap tree samples** (``3_UFBOOTs/ufboot_for_alerax/
+*.ufboot``) rather than pre-built CCPs. We convert each ufboot to a classic
+ALEobserve ``.ale`` CCP once (``ALEobserve <ufboot>`` via the boussau/alesuite
+Singularity image -- exactly what AleRax consumes), then load it through gpurec's
+validated ``.ale`` pipeline (``io/ale.py``). So the family path is IDENTICAL to
+Williams (``_load_species_helpers`` + ``_load_families``); only the tree paths and
+the ccp directory differ. Everything downstream (wave layout, fraction-missing,
+Brownian prior, origination, the specieswise wave optimize, the output format) is
+shared with the Williams driver and imported from it, so the two stay in
+lock-step.
 
 Output matches AleRax ``model_parameters.txt`` (``# node D L T [O]``) + a JSON
 sidecar with the prior-free ``data_log_likelihood_ln`` used for the rooting test.
@@ -21,7 +22,7 @@ Run on an A100 (CUDA required for optimize):
     PYTHONPATH=. python experiments/run_undine_branchwise.py --root Eury \
         --fm-mode e-only --origination optimize --prior brownian --brownian-sigma 1.0
 
-Data-wiring sanity (amalgamate a few ufboots, check species mapping; CPU only):
+Data-wiring sanity (load a few .ale, check species mapping; CPU only):
 
     PYTHONPATH=. python experiments/run_undine_branchwise.py --root Eury --preflight
 """
@@ -46,9 +47,13 @@ from run_williams_branchwise import (  # noqa: E402
     _sp_helpers_for_uniform,
     _build_leaf_E,
     _parse_fraction_missing,
+    _load_species_helpers,
+    _load_families,
 )
 
-_INV_LN2 = 1.0 / math.log(2.0)  # C++ emits ln; CCP probs -> log2 on load.
+# ALEobserve writes <ufboot>.ale next to the input, so the CCPs live in the
+# ufboot dir by default.
+DEFAULT_CCP_SUBDIR = "3_UFBOOTs/ufboot_for_alerax"
 
 DEFAULT_DATA_DIR = (
     "/work/SzollosiU/gergely-szollosi/williams_run/data/"
@@ -66,16 +71,12 @@ def _tree_path(data_dir: Path, root: str) -> Path:
     return data_dir / "4_species_tree" / f"Undine_C60_{root}root_short_name.nw"
 
 
-def _ufboot_paths(data_dir: Path):
-    # The AleRax-ready UFBoot samples live under 3_UFBOOTs/ufboot_for_alerax/;
-    # fall back to a flat 3_UFBOOTs/ layout if that subdir is absent.
-    out = []
-    for pat in ("3_UFBOOTs/ufboot_for_alerax/*.ufboot", "3_UFBOOTs/*.ufboot"):
-        out += [p for p in glob.glob(str(data_dir / pat))
-                if not Path(p).name.startswith("._")]
-        if out:
-            break
-    return sorted(out)
+def _ale_paths(data_dir: Path, ccp_subdir: str):
+    """The ALEobserve .ale CCPs (one per family, produced from the ufboots)."""
+    return sorted(
+        p for p in glob.glob(str(data_dir / ccp_subdir / "*.ale"))
+        if not Path(p).name.startswith("._")
+    )
 
 
 def _fraction_missing_path(data_dir: Path) -> Path:
@@ -83,82 +84,43 @@ def _fraction_missing_path(data_dir: Path) -> Path:
     return data_dir / "fraction_missing"
 
 
-# ── family loading via the C++ amalgamator (ufboot samples -> CCP) ─────────────
-def _load_species_and_families(tree_path, ufboot_paths, *, min_species, dtype,
+# ── family loading via the validated .ale pipeline (ALEobserve output) ─────────
+def _load_species_and_families(tree_path, ale_paths, *, min_species, dtype,
                                limit=0):
-    """Amalgamate UFBoot samples into per-family CCPs + load species helpers.
+    """Load species helpers from the Undine tree + per-family CCPs from .ale.
 
-    Returns (species_helpers, families, stats). ``families`` items match the
-    format ``_build_wave_layout`` / the Williams driver expect.
+    Identical machinery to the Williams driver (``_load_species_helpers`` +
+    ``_load_families`` -> ``build_family_from_ale``). Returns
+    (species_helpers, families, stats).
     """
-    from gpurec.core.preprocess_cpp import _load_extension
-
-    ext = _load_extension()
-    if limit and limit > 0:
-        ufboot_paths = ufboot_paths[:limit]
-    family_names = [f"family_{i:06d}" for i in range(len(ufboot_paths))]
-    families_input = {n: [str(p)] for n, p in zip(family_names, ufboot_paths)}
-
     t0 = time.time()
-    raw_all = ext.preprocess_multiple_families(str(tree_path), families_input)
-    species_helpers = raw_all["species"]
-    raw_by_family = raw_all["families"]
-    parse_s = time.time() - t0
-
-    families = []
-    kept = 0
-    dropped_min_species = 0
-    leaf_count_hist: Counter[int] = Counter()
-    for name, path in zip(family_names, ufboot_paths):
-        raw = raw_by_family.get(name)
-        if raw is None:
-            continue
-        ccp = raw["ccp"]
-        # distinct species this family touches = distinct species-tree columns.
-        col = raw["leaf_col_index"]
-        n_species = int(torch.as_tensor(col).unique().numel())
-        leaf_count_hist[n_species] += 1
-        if n_species < min_species:
-            dropped_min_species += 1
-            continue
-        # ln -> log2 (mirror GeneDataset / Williams loader).
-        ccp["log_split_probs_sorted"] = ccp["log_split_probs_sorted"] * _INV_LN2
-        families.append({
-            "ccp_helpers": ccp,
-            "root_clade_id": int(ccp["root_clade_id"]),
-            "leaf_row_index": raw["leaf_row_index"],
-            "leaf_col_index": raw["leaf_col_index"],
-            "C": int(ccp["C"]),
-            "N_splits": int(ccp["N_splits"]),
-        })
-        kept += 1
-
-    stats = {
-        "n_considered": len(ufboot_paths),
-        "kept": kept,
-        "dropped_min_species": dropped_min_species,
-        "parse_seconds": parse_s,
-        "leaf_count_hist": leaf_count_hist,
-    }
+    species_helpers = _load_species_helpers(str(tree_path))
+    sp_name_to_idx = species_helpers["species_name_to_index"]
+    families, fstats = _load_families(
+        ale_paths, sp_name_to_idx,
+        min_species=min_species, dtype=dtype, limit=limit,
+    )
+    stats = dict(fstats)
+    stats["parse_seconds"] = time.time() - t0
     return species_helpers, families, stats
 
 
-# ── preflight (CPU; amalgamate a few, check species mapping) ───────────────────
+# ── preflight (CPU; load a few .ale, check species mapping) ────────────────────
 def _preflight(args, data_dir: Path):
     tree_path = _tree_path(data_dir, args.root)
     if not tree_path.exists():
         raise SystemExit(f"species tree not found: {tree_path}")
-    ufboots = _ufboot_paths(data_dir)
-    if not ufboots:
-        raise SystemExit(f"no .ufboot files under {data_dir / '3_UFBOOTs'}")
+    ale_paths = _ale_paths(data_dir, args.ccp_dir)
+    if not ale_paths:
+        raise SystemExit(f"no .ale files under {data_dir / args.ccp_dir} "
+                         f"(run ALEobserve on the ufboots first)")
     print(f"[preflight] root={args.root}")
-    print(f"  tree   : {tree_path}")
-    print(f"  ufboots: {len(ufboots)} families found")
-    n = min(args.families if args.families > 0 else 50, len(ufboots))
-    print(f"  amalgamating first {n} families (species mapping check) ...",
-          flush=True)
+    print(f"  tree : {tree_path}")
+    print(f"  .ale : {len(ale_paths)} families found under {args.ccp_dir}")
+    n = min(args.families if args.families > 0 else 50, len(ale_paths))
+    print(f"  loading first {n} families (species mapping check) ...", flush=True)
     sp, fams, stats = _load_species_and_families(
-        tree_path, ufboots[:n], min_species=args.min_species, dtype=torch.float64,
+        tree_path, ale_paths[:n], min_species=args.min_species, dtype=torch.float64,
     )
     S = int(sp["S"])
     names = list(sp["names"])
@@ -168,9 +130,12 @@ def _preflight(args, data_dir: Path):
     print(f"  species tree: S={S} nodes ({n_leaves} leaves)")
     print(f"  tree leaf labels (first 8): {sorted(names)[:8]}")
     print(f"  families kept={stats['kept']} dropped(<{args.min_species} sp)="
-          f"{stats['dropped_min_species']}  amalgamate={stats['parse_seconds']:.2f}s")
-    print(f"  per-family #species histogram (low end): "
-          f"{sorted(stats['leaf_count_hist'].items())[:8]}")
+          f"{stats.get('dropped_min_species', 0)}  load={stats['parse_seconds']:.2f}s")
+    if stats.get("missing_species_counter"):
+        print(f"  [warn] species in .ale absent from tree (top): "
+              f"{stats['missing_species_counter'].most_common(8)}")
+    else:
+        print(f"  [OK] all sampled .ale species present in the tree.")
     fm = _fraction_missing_path(data_dir)
     print(f"  fraction_missing: {'FOUND ' + str(fm) if fm.exists() else 'not present'}")
     print("PREFLIGHT ok. Re-run without --preflight on an A100 to optimize.")
@@ -184,9 +149,10 @@ def _run(args, data_dir: Path):
         print(f"[warn] root {args.root!r} not in known Undine roots {KNOWN_ROOTS}")
     if not tree_path.exists():
         raise SystemExit(f"species tree not found: {tree_path}")
-    ufboots = _ufboot_paths(data_dir)
-    if not ufboots:
-        raise SystemExit(f"no .ufboot files under {data_dir / '3_UFBOOTs'}")
+    ale_paths = _ale_paths(data_dir, args.ccp_dir)
+    if not ale_paths:
+        raise SystemExit(f"no .ale files under {data_dir / args.ccp_dir} "
+                         f"(run ALEobserve on the ufboots first)")
     if not torch.cuda.is_available():
         raise SystemExit("CUDA required for optimization (run on the A100). "
                          "Use --preflight for the CPU data-wiring check.")
@@ -196,18 +162,18 @@ def _run(args, data_dir: Path):
     from gpurec.optimization.wave_optimizer import optimize_theta_wave
     from gpurec.core.tree_prior import species_parent_index
 
-    print(f"[1/5] Amalgamating {len(ufboots)} UFBoot families on tree "
+    print(f"[1/5] Loading {len(ale_paths)} .ale families on tree "
           f"{tree_path.name} (min-species={args.min_species}) ...", flush=True)
     species_helpers, families, stats = _load_species_and_families(
-        tree_path, ufboots, min_species=args.min_species, dtype=dtype,
+        tree_path, ale_paths, min_species=args.min_species, dtype=dtype,
         limit=args.families,
     )
     S = int(species_helpers["S"])
     names = list(species_helpers["names"])
     sp_name_to_idx = species_helpers["species_name_to_index"]
     print(f"      S={S} species nodes;  families kept={stats['kept']} "
-          f"dropped(<{args.min_species} sp)={stats['dropped_min_species']}  "
-          f"amalgamate={stats['parse_seconds']:.1f}s", flush=True)
+          f"dropped(<{args.min_species} sp)={stats.get('dropped_min_species', 0)}  "
+          f"load={stats['parse_seconds']:.1f}s", flush=True)
     if not families:
         raise SystemExit("no usable families after filtering; aborting.")
 
@@ -385,6 +351,9 @@ def _parse_args(argv=None):
                     "big tree from UFBoot samples (gpurec specieswise wave).")
     p.add_argument("--root", required=True, help=f"one of {KNOWN_ROOTS}")
     p.add_argument("--data-dir", default=DEFAULT_DATA_DIR)
+    p.add_argument("--ccp-dir", default=DEFAULT_CCP_SUBDIR,
+                   help="dir (under --data-dir) of ALEobserve .ale CCPs; "
+                        f"default {DEFAULT_CCP_SUBDIR}")
     p.add_argument("--min-species", type=int, default=1)
     p.add_argument("--families", type=int, default=0,
                    help="limit #families (0=all; for quick tests)")
@@ -405,7 +374,7 @@ def _parse_args(argv=None):
     p.add_argument("--dtype", default="float64", choices=["float32", "float64"])
     p.add_argument("--out", default=None)
     p.add_argument("--preflight", action="store_true",
-                   help="amalgamate a sample + check species mapping, then exit (CPU)")
+                   help="load a sample of .ale + check species mapping, then exit (CPU)")
     args = p.parse_args(argv)
     if args.no_fraction_missing:
         args.fm_mode = "off"
