@@ -76,9 +76,13 @@ def main():
     ap.add_argument("--prior-mu", type=float, default=None,
                     help="ridge prior centre (log2-rate). Default: theta* (kept-coord) mean.")
     ap.add_argument("--fd-eps", type=float, default=1e-3,
-                    help="central finite-diff step in log2 units.")
+                    help="central finite-diff step (log2 units) for Hessian-vector products.")
     ap.add_argument("--max-full-k", type=int, default=120,
-                    help="abort if free-param count exceeds this (use Lanczos instead).")
+                    help="k_eff <= this -> exact full FD Hessian (2k Hv); else Lanczos+SLQ.")
+    ap.add_argument("--lanczos-m", type=int, default=32,
+                    help="Lanczos steps for the SLQ log-det/p_eff estimate (large-k path).")
+    ap.add_argument("--lanczos-probes", type=int, default=3,
+                    help="stochastic probe vectors for SLQ (large-k path).")
     ap.add_argument("--max-families", type=int, default=0)
     ap.add_argument("--extra-ale-dir", action="append", default=None)
     ap.add_argument("--out", default=None)
@@ -219,57 +223,123 @@ def main():
 
     # ---- finite-diff Hessian in model coords (central) -----------------------
     eps = float(args.fd_eps)
+    tau = float(args.tau)
     g0 = reduce_grad(batched_grad(expand(tp0)))            # [k] bits
     grad_inf = float(g0.abs().max().item())
-    print(f"[fd] k={k} eps={eps} building Hessian ({2*k} solves); "
-          f"||grad0||_inf={grad_inf:.3e}", flush=True)
-    H = torch.zeros(k, k, dtype=dtype, device=device)
-    for j in range(k):
-        ej = torch.zeros(k, dtype=dtype, device=device)
-        ej[j] = eps
-        gp = reduce_grad(batched_grad(expand(tp0 + ej)))
-        gm = reduce_grad(batched_grad(expand(tp0 - ej)))
-        H[:, j] = (gp - gm) / (2.0 * eps)
-        if (j + 1) % 10 == 0:
-            print(f"[fd]   col {j+1}/{k}", flush=True)
-    H = 0.5 * (H + H.t())
-    H_nats = _LN2 * H                                       # bits Hessian -> nat Hessian (one ln2)
 
-    # ---- boundary / floored params -------------------------------------------
+    # ---- boundary / floored params (drop KKT-active before curvature) --------
     floored = tp0 <= (_THETA_MIN + 1e-6)
     kkt_active = floored & (g0 > 1e-6)
     keep = ~kkt_active
+    keep_idx = torch.nonzero(keep, as_tuple=False).flatten()
     k_eff = int(keep.sum())
-    H_U = H_nats[keep][:, keep]
     tp_U = tp0[keep]
     n_floored = int(floored.sum())
     n_active = int(kkt_active.sum())
     print(f"[boundary] k={k} floored={n_floored} kkt_active(dropped)={n_active} "
-          f"k_eff={k_eff}", flush=True)
+          f"k_eff={k_eff}; ||grad0||_inf={grad_inf:.3e}", flush=True)
+
+    # Hessian-VECTOR product on kept coords (NAT units) via central FD of the
+    # EXACT gradient: 2 grad evals per Hv, INDEPENDENT of k_eff.
+    def hv_keep(v_keep):
+        v_full = torch.zeros(k, dtype=dtype, device=device)
+        v_full[keep_idx] = v_keep
+        gp = reduce_grad(batched_grad(expand(tp0 + eps * v_full)))
+        gm = reduce_grad(batched_grad(expand(tp0 - eps * v_full)))
+        return _LN2 * ((gp - gm) / (2.0 * eps))[keep_idx]
+
+    # ---- curvature: exact full Hessian (2k Hv) for small k, else Lanczos+SLQ --
+    if k_eff <= args.max_full_k:
+        print(f"[hess] FULL finite-diff Hessian: {2 * k_eff} solves", flush=True)
+        H_U = torch.zeros(k_eff, k_eff, dtype=dtype, device=device)
+        for j in range(k_eff):
+            ej = torch.zeros(k_eff, dtype=dtype, device=device)
+            ej[j] = 1.0
+            H_U[:, j] = hv_keep(ej)
+            if (j + 1) % 20 == 0:
+                print(f"[hess]   col {j + 1}/{k_eff}", flush=True)
+        H_U = 0.5 * (H_U + H_U.t())
+        A = H_U + tau * torch.eye(k_eff, dtype=dtype, device=device)
+        evA = torch.linalg.eigvalsh(0.5 * (A + A.t()))
+        n_neg = int((evA <= 0).sum())
+        logdet = float(torch.log(evA.clamp(min=tau * 1e-6)).sum())
+        evH = torch.linalg.eigvalsh(H_U).clamp(min=0)
+        p_eff = float((evH / (evH + tau)).sum())
+        top5 = evH.flip(0)[:5].tolist()
+        bot5 = evH[:5].tolist()
+        null_dim = int((evH < 1e-8 * evH.max().clamp(min=1)).sum())
+        hess_method = "full_fd"
+        n_hv = k_eff
+    else:
+        m = int(args.lanczos_m)
+        n_probe = int(args.lanczos_probes)
+        print(f"[hess] LANCZOS+SLQ: m={m} probes={n_probe} -> ~{2 * m * n_probe} "
+              f"solves (vs {2 * k_eff} full)", flush=True)
+
+        def matvec_A(w):
+            return hv_keep(w) + tau * w
+
+        gen = torch.Generator(device="cpu")
+        gen.manual_seed(20260619)
+        logdet_acc = 0.0
+        peff_acc = 0.0
+        ritz_top = []
+        for p in range(n_probe):
+            v = (torch.randint(0, 2, (k_eff,), generator=gen).to(dtype) * 2 - 1).to(device)
+            alphas, betas, Q = [], [], []
+            q = v / torch.linalg.vector_norm(v)
+            Q.append(q)
+            w = matvec_A(q)
+            a = float(torch.dot(w, q))
+            alphas.append(a)
+            w = w - a * q
+            for j in range(1, m):
+                b = float(torch.linalg.vector_norm(w))
+                if b < 1e-10:
+                    break
+                betas.append(b)
+                qn = w / b
+                for qi in Q:                       # full reorthogonalization
+                    qn = qn - torch.dot(qn, qi) * qi
+                qn = qn / torch.linalg.vector_norm(qn)
+                Q.append(qn)
+                w = matvec_A(qn)
+                a = float(torch.dot(w, qn))
+                alphas.append(a)
+                w = w - a * qn - b * Q[-2]
+            mm = len(alphas)
+            T = torch.zeros(mm, mm, dtype=dtype, device=device)
+            for i in range(mm):
+                T[i, i] = alphas[i]
+            for i in range(len(betas)):
+                T[i, i + 1] = betas[i]
+                T[i + 1, i] = betas[i]
+            ev, evec = torch.linalg.eigh(T)
+            wt = evec[0, :] ** 2                   # SLQ quadrature weights
+            evc = ev.clamp(min=tau * 1e-6)         # eigenvalues of A=H+tauI (PD)
+            logdet_acc += k_eff * float((wt * torch.log(evc)).sum())
+            peff_acc += k_eff * float((wt * ((ev - tau) / evc)).sum())
+            ritz_top.append(float(ev.max()))
+        logdet = logdet_acc / n_probe
+        p_eff = peff_acc / n_probe
+        n_neg = 0
+        top5 = sorted(ritz_top, reverse=True)[:5]
+        bot5 = []
+        null_dim = None
+        hess_method = "lanczos_slq"
+        n_hv = m * n_probe
 
     # ---- evidence (ridge Gaussian prior) -------------------------------------
-    tau = float(args.tau)
     mu = float(args.prior_mu) if args.prior_mu is not None else float(tp_U.mean())
-    eye = torch.eye(k_eff, dtype=dtype, device=device)
-    A = 0.5 * (H_U + H_U.t()) + tau * eye
-    A = 0.5 * (A + A.t())
-    evA = torch.linalg.eigvalsh(A)
-    n_neg = int((evA <= 0).sum())
-    evA_c = evA.clamp(min=tau * 1e-6)
-    logdet = float(torch.log(evA_c).sum())
     data_logL_ln = float(meta["data_log_likelihood_ln"])
     prior_quad = 0.5 * tau * float(((tp_U - mu) ** 2).sum())
     log_prior = 0.5 * k_eff * math.log(tau) - prior_quad
     occam = -0.5 * logdet
     log_Z = data_logL_ln + log_prior + occam
 
-    evH = torch.linalg.eigvalsh(0.5 * (H_U + H_U.t())).clamp(min=0)
-    p_eff = float((evH / (evH + tau)).sum())
-    null_dim = int((evH < 1e-8 * evH.max().clamp(min=1)).sum())
-
     out = {
         "sidecar": str(args.sidecar), "root": root, "model": model, "fm_mode": fm_mode,
-        "hessian": "finite_diff_full", "fd_eps": eps, "F_families": F,
+        "hessian": hess_method, "n_hv": n_hv, "fd_eps": eps, "F_families": F,
         "n_families_kept_driver": meta.get("n_families_kept"),
         "k_nominal": int(k), "k_eff": k_eff, "n_floored": n_floored,
         "n_kkt_active_dropped": n_active, "n_neg_eig_posterior": n_neg,
@@ -277,7 +347,7 @@ def main():
         "log_prior": log_prior, "occam_factor": occam, "logdet_posterior": logdet,
         "log_Z": log_Z, "p_eff": p_eff, "p_eff_minus_k": p_eff - k_eff,
         "null_dim": null_dim, "data_grad_inf_bits": grad_inf, "prior_fit": _prior_kind,
-        "eig_H_top5": evH.flip(0)[:5].tolist(), "eig_H_bot5": evH[:5].tolist(),
+        "eig_H_top5": top5, "eig_H_bot5": bot5,
     }
     out_path = args.out or (str(args.sidecar).replace(".rates.txt.json", "") + ".evidence.json")
     Path(out_path).write_text(json.dumps(out, indent=2))
