@@ -394,6 +394,8 @@ def implicit_grad_loglik_vjp_wave_genewise(
     local_iters: int = 2000,
     local_tolerance: float = 1e-3,
     ancestors_T=None,
+    leaf_E=None,
+    leaf_obs_log=None,
 ):
     """Genewise implicit gradient via per-family Pi forward + backward loop.
 
@@ -498,6 +500,8 @@ def implicit_grad_loglik_vjp_wave_genewise(
             gmres_restart=gmres_restart,
             pibar_mode=pibar_mode,
             ancestors_T=ancestors_T,
+            leaf_E=leaf_E,
+            leaf_obs_log=leaf_obs_log,
         )
 
         grad_thetas.append(grad_theta_g)

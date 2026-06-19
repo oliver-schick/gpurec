@@ -137,9 +137,29 @@ def main():
     root = meta["root"]
     fm_mode = meta.get("fm_mode", "e-only")
     if fm_mode == "both":
-        print("[warn] fm_mode='both' uses a Pi leaf boundary the genewise "
-              "per-family backward does NOT replicate; scores would be biased. "
-              "These runs are e-only -- proceeding only if e-only/off.", flush=True)
+        raise SystemExit(
+            "fm_mode='both' applies a Pi leaf boundary that the genewise "
+            "per-family backward does NOT replicate -> the per-family scores "
+            "would be inconsistent with the sidecar's theta*/data_logL. Refit "
+            "with --fm-mode e-only (the AleRax-faithful mode) before computing "
+            "evidence.")
+    # Guards: the scores below assume UNIFORM origination and the empirical
+    # Fisher assumes the MAP == data MLE (prior excluded). Reject sidecars that
+    # violate these (the standard rooting/grouped runs satisfy both).
+    _orig = meta.get("origination", {})
+    _orig_strategy = _orig.get("origination", "uniform") if isinstance(_orig, dict) else "uniform"
+    if _orig_strategy != "uniform":
+        raise SystemExit(
+            f"origination='{_orig_strategy}': scores here use uniform p^O and "
+            "would be inconsistent with the sidecar's origination-weighted "
+            "data_logL. Thread log_pO before using such sidecars.")
+    _prior = meta.get("prior", {})
+    _prior_kind = _prior.get("prior", "none") if isinstance(_prior, dict) else "none"
+    if _prior_kind != "none":
+        print(f"[warn] sidecar fit with prior='{_prior_kind}': theta* is the MAP "
+              "under that prior, so the data score sum_f g_f != 0 and the "
+              "empirical Fisher is a more biased Hessian surrogate. Evidence "
+              "uses an independent ridge prior; interpret with care.", flush=True)
     theta_log2 = torch.tensor(meta["theta_log2"], dtype=dtype, device=device)  # [S,3]
     cg = meta.get("clade_groups") or {}
     cg_dir = cg.get("clade_groups") if isinstance(cg, dict) else None
@@ -215,16 +235,11 @@ def main():
         mt_all=_bc(mt),
         theta_stack=theta_log2.reshape(1, S, 3).expand(F, S, 3),
         unnorm_row_max=unnorm_row_max, specieswise=True, device=device,
-        dtype=dtype, pibar_mode="uniform", ancestors_T=ancestors_T)
+        dtype=dtype, pibar_mode="uniform", ancestors_T=ancestors_T,
+        leaf_E=leaf_E, leaf_obs_log=leaf_obs_log)
     # g_stack: [F,S,3] = d(NLL_f)/dtheta (bits). NLL is a loss => score of logL is -g.
-    nan_fam = torch.isnan(g_stack.reshape(F, -1)).any(dim=1)
-    n_nan = int(nan_fam.sum())
-    if n_nan:
-        print(f"[scores] dropping {n_nan} families with NaN scores", flush=True)
-        g_stack = g_stack[~nan_fam]
-        F = g_stack.shape[0]
 
-    # ---- VALIDATION: sum_f g_f == batched shared-theta gradient --------------
+    # ---- VALIDATION (BEFORE any family drop): sum_f g_f == batched gradient ---
     Pi_b = Pi_wave_forward(
         wave_layout=wave_layout, species_helpers=sp_gpu, E=E_out["E"],
         Ebar=E_out["E_bar"], E_s1=E_out["E_s1"], E_s2=E_out["E_s2"],
@@ -238,12 +253,30 @@ def main():
         log_pS=log_pS, log_pD=log_pD, log_pL=log_pL, max_transfer_mat=mt,
         root_clade_ids_perm=wave_layout["root_clade_ids"], theta=theta_log2,
         unnorm_row_max=unnorm_row_max, specieswise=True, device=device, dtype=dtype,
-        pibar_mode="uniform", ancestors_T=ancestors_T)
-    g_sum = g_stack.sum(dim=0)                                   # [S,3]
+        pibar_mode="uniform", ancestors_T=ancestors_T,
+        leaf_E=leaf_E, leaf_obs_log=leaf_obs_log)
+    g_sum = g_stack.sum(dim=0)                                   # [S,3] (full set)
     resid = float((g_sum - grad_batched).abs().max().item())
     denom = float(grad_batched.abs().max().item()) + 1e-30
-    print(f"[validate] max|sum_f g_f - grad_batched| = {resid:.3e} "
-          f"(rel {resid/denom:.3e})", flush=True)
+    rel = resid / denom
+    print(f"[validate] max|sum_f g_f - grad_batched| = {resid:.3e} (rel {rel:.3e})",
+          flush=True)
+    if not math.isfinite(rel) or rel > 1e-4:
+        raise SystemExit(
+            f"per-family scores FAILED validation (rel={rel:.2e}): sum_f g_f != "
+            "batched gradient. The empirical Fisher would be wrong; aborting.")
+    # Stationarity (empirical Fisher ~ observed Hessian only at the MLE): with
+    # prior='none' the MAP is the data MLE, so the (kept) data gradient ~ 0.
+    grad_inf = float(grad_batched.abs().max().item())
+
+    # NaN families (stale unnorm_row_max gotcha): drop AFTER validation passed.
+    nan_fam = torch.isnan(g_stack.reshape(F, -1)).any(dim=1)
+    n_nan = int(nan_fam.sum())
+    if n_nan:
+        print(f"[scores] dropping {n_nan}/{F} families with NaN scores "
+              "(post-validation; G excludes them)", flush=True)
+        g_stack = g_stack[~nan_fam]
+        F = g_stack.shape[0]
 
     # ---- model + reduction ---------------------------------------------------
     group_index = None
@@ -324,7 +357,12 @@ def main():
         "null_dim": nulldim,
         "cond_number": cond,
         "validation_resid_max": resid,
-        "validation_resid_rel": resid / denom,
+        "validation_resid_rel": rel,
+        "validation_passed": True,
+        "data_grad_inf_bits": grad_inf,
+        "n_nan_dropped": n_nan,
+        "origination": _orig_strategy,
+        "prior_fit": _prior_kind,
         "eig_G_top5": evG.flip(0)[:5].tolist(),
         "eig_G_bot5": evG[:5].tolist(),
     }

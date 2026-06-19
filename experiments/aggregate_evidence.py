@@ -49,6 +49,11 @@ def main(paths):
     for model, d in sorted(by_model.items()):
         print()
         print(f"### MODEL = {model}   (k_eff per root)")
+        keffs = sorted(set(r["k_eff"] for r in d.values()))
+        if len(keffs) > 1:
+            print(f"  [!] k_eff VARIES across roots {keffs}: the (k/2)ln(tau) and "
+                  "logdet dimensionality do not fully cancel in the softmax -- "
+                  "rooting log_Z differences are only approximately comparable.")
         post = _softmax({root: r["log_Z"] for root, r in d.items()})
         best = max(d, key=lambda root: d[root]["log_Z"])
         bestlz = d[best]["log_Z"]
