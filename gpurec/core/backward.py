@@ -403,6 +403,7 @@ def Pi_wave_backward(
     family_idx=None,
     uniform_pibar_row_max=None,
     leaf_obs_log=None,
+    log_pO=None,
 ):
     """Wave-decomposed backward pass for implicit gradient computation.
 
@@ -435,6 +436,15 @@ def Pi_wave_backward(
             leaf term) rather than reading saved Pi, so the same fraction-missing
             baseline must be injected here or gradients are inconsistent. None ->
             byte-identical to before.
+        log_pO: optional [S] tensor = log2(p^O_e), the per-branch ORIGINATION
+            log-probability (a distribution over branches, Σ_e p^O_e = 1). The
+            likelihood numerator is logsumexp2(Pi[root,:] + log_pO), so the root
+            seed ∂numerator/∂Pi[root,j] is the ORIGINATION-WEIGHTED softmax
+            exp2(Pi[root,j] + log_pO_j - logsumexp2(Pi[root,:] + log_pO)). None
+            (default) -> uniform p^O_e = 1/S, which (since the per-row softmax is
+            shift-invariant) gives the SAME seed as the un-weighted softmax, so the
+            path is byte-identical to before. log_pO affects ONLY this seed; the
+            self-loop / cross-clade backward recursions are unchanged.
 
     Returns:
         dict with:
@@ -945,8 +955,18 @@ def Pi_wave_backward(
     for r in root_clade_ids_perm:
         r = int(r)
         root_Pi = Pi_star_wave[r]
-        lse = logsumexp2(root_Pi, dim=0)
-        accumulated_rhs[r] = -_safe_exp2_ratio(root_Pi, lse)
+        if log_pO is None:
+            # Uniform origination: ∂numerator/∂Pi[root] = softmax(Pi[root,:]).
+            # (Byte-identical to before; the per-row softmax is shift-invariant,
+            # so adding a constant log_pO = -log2(S) would give the same seed.)
+            weighted = root_Pi
+        else:
+            # Origination-weighted: numerator = logsumexp2(Pi[root,:] + log_pO),
+            # so the seed is softmax(Pi[root,:] + log_pO). log_pO is [S] and
+            # broadcasts onto this single root row.
+            weighted = root_Pi + log_pO
+        lse = logsumexp2(weighted, dim=0)
+        accumulated_rhs[r] = -_safe_exp2_ratio(weighted, lse)
 
     grad_log_pD = torch.zeros_like(log_pD)
     grad_log_pS = torch.zeros_like(log_pS)

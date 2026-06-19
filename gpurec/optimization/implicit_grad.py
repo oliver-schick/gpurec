@@ -11,7 +11,7 @@ from torch import func as tfunc
 
 from gpurec.core.likelihood import E_step
 from gpurec.core.backward import Pi_wave_backward
-from gpurec.core.log2_utils import _safe_log2_internal as _safe_log2
+from gpurec.core.log2_utils import _safe_log2_internal as _safe_log2, logsumexp2 as _logsumexp2
 from gpurec.core.extract_parameters import extract_parameters, extract_parameters_uniform
 
 from .linear_solvers import _cg, _gmres
@@ -64,6 +64,7 @@ def implicit_grad_loglik_vjp_wave(
     uniform_pibar_row_max: Optional[torch.Tensor] = None,
     leaf_E: Optional[torch.Tensor] = None,
     leaf_obs_log=_PI_LEAF_UNSET,
+    log_pO: Optional[torch.Tensor] = None,
 ):
     """Compute ∇θ logL using wave-decomposed backward pass + E adjoint.
 
@@ -83,6 +84,15 @@ def implicit_grad_loglik_vjp_wave(
     not pass it), it defaults to ``leaf_E`` so existing callers that pass only
     ``leaf_E`` keep the previous "both" behavior, byte-identical to before. An
     explicit ``leaf_obs_log=None`` turns the Pi backward boundary off.
+
+    ``log_pO`` (optional [S]) is the per-branch ORIGINATION log-probability
+    ``log2(p^O_e)``. Origination enters compute_log_likelihood's numerator (the
+    root reconciliation sum) and denominator (the survival term), so it changes
+    the THETA-gradient SEEDs only: the Pi root seed (origination-weighted softmax,
+    forwarded to ``Pi_wave_backward``) and the E denominator seed
+    (origination-weighted survival, forwarded to ``_e_adjoint_and_theta_vjp``). It
+    does NOT enter the E or Pi fixed-point maps. None (default) -> uniform
+    p^O_e = 1/S, byte-identical to before.
 
     Returns (grad_theta, pi_backward_info).
     """
@@ -110,6 +120,7 @@ def implicit_grad_loglik_vjp_wave(
         ancestors_T=ancestors_T,
         uniform_pibar_row_max=uniform_pibar_row_max,
         leaf_obs_log=leaf_obs_log,
+        log_pO=log_pO,
     )
     torch.cuda.synchronize()
     _t_pi_bwd = time.perf_counter() - _t_pi_bwd_0
@@ -125,6 +136,7 @@ def implicit_grad_loglik_vjp_wave(
         transfer_mat_unnormalized=transfer_mat_unnormalized,
         ancestors_T=ancestors_T,
         leaf_E=leaf_E,
+        log_pO=log_pO,
     )
     statsG.pi_bwd_time = _t_pi_bwd
     return grad_theta, statsG
@@ -143,6 +155,7 @@ def _e_adjoint_and_theta_vjp(
     pibar_mode='uniform',
     transfer_mat=None, transfer_mat_unnormalized=None, ancestors_T=None,
     leaf_E=None,
+    log_pO=None,
 ):
     """E adjoint solve + theta VJP from pre-computed Pi backward result.
 
@@ -162,12 +175,26 @@ def _e_adjoint_and_theta_vjp(
     sp_P_idx = species_helpers['s_P_indexes']
     sp_c12_idx = species_helpers['s_C12_indexes']
 
-    # Direct dNLL/dE from likelihood denominator
+    # Direct dNLL/dE from likelihood denominator.
+    #
+    # NLL = -(numerator - denominator), so the denominator term enters NLL with a
+    # +sign. The direct dNLL/dE we seed here is +∂(denominator)/∂E summed over the
+    # families that share this E. With ORIGINATION, the denominator is the
+    # origination-weighted survival term (matching compute_log_likelihood):
+    #   denom = logsumexp2(log2(1 - exp2(E)) + log_pO)
+    # whereas the uniform path keeps the byte-identical mean form
+    #   denom = log2(1 - mean(exp2(E))).
+    # The two agree exactly for log_pO = -log2(S); we keep the original expression
+    # in the None branch so the uniform gradient is byte-identical to before.
     n_fam = root_clade_ids_perm.numel()
     E_req_d = E_star.detach().requires_grad_(True)
     with torch.enable_grad():
-        mean_E_exp = torch.exp2(E_req_d).mean(dim=-1)
-        denom = torch.log2(1.0 - mean_E_exp)
+        if log_pO is None:
+            denom = torch.log2(1.0 - torch.exp2(E_req_d).mean(dim=-1))
+        else:
+            # Origination-weighted survival; _safe_log2 guards E -> 0.
+            log_one_minus_E = _safe_log2(1.0 - torch.exp2(E_req_d))
+            denom = _logsumexp2(log_one_minus_E + log_pO, dim=-1)
         # Shared-E mode: denominator contributes once per family => n_fam * denom.
         # Genewise mode: E is per-family [G, S], so each row contributes once.
         if E_req_d.ndim > 1 and E_req_d.shape[0] == n_fam:

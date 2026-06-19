@@ -157,28 +157,30 @@ def brownian_log_prior_and_grad(
 
     Parameters
     ----------
-    theta : Tensor [S, 3]
-        Species-wise log2 rates (columns ordered [D, L, T]).
+    theta : Tensor [S, K]
+        Species-wise log2 values, one column per axis. Normally K=3 (rate
+        columns [D, L, T]); K=1 is used to regularize the per-branch
+        origination log2-weight ``omega`` (passed reshaped to [S, 1]).
     parent_index : LongTensor [S]
         Parent of each node; root maps to ``-1`` (or to itself -- both are
         treated as "root" and excluded from the increment sum).
     sigma : float or Tensor
-        Brownian increment std (log2 units), scalar or per-axis [3].
+        Brownian increment std (log2 units), scalar or per-axis [K].
     sigma_root : float or Tensor
-        Root-anchor std (log2 units), scalar or per-axis [3].
+        Root-anchor std (log2 units), scalar or per-axis [K].
     mu : float or Tensor
-        Root-anchor centre (log2 units), scalar or per-axis [3].
+        Root-anchor centre (log2 units), scalar or per-axis [K].
 
     Returns
     -------
     penalty : Tensor (0-dim scalar)
         ``P`` above; add this to the NLL.
-    grad : Tensor [S, 3]
+    grad : Tensor [S, K]
         ``dP/dtheta``; add this to the NLL gradient.
     """
-    if theta.ndim != 2 or theta.shape[1] != 3:
-        raise ValueError(f"theta must have shape [S, 3], got {tuple(theta.shape)}")
-    S = theta.shape[0]
+    if theta.ndim != 2:
+        raise ValueError(f"theta must have shape [S, K], got {tuple(theta.shape)}")
+    S, K = theta.shape[0], theta.shape[1]
     device, dtype = theta.device, theta.dtype
 
     parent_index = parent_index.to(device=device, dtype=torch.long)
@@ -187,18 +189,20 @@ def brownian_log_prior_and_grad(
             f"parent_index must have shape [{S}], got {tuple(parent_index.shape)}"
         )
 
-    # Per-axis precision (1/sigma^2). Broadcast scalar -> [3].
+    # Per-axis precision (1/sigma^2). Broadcast scalar -> [K]. K is normally 3
+    # (the D,L,T rate columns); K=1 is used to regularize the per-branch
+    # origination log2-weight omega (passed reshaped to [S,1]).
     def _as_axis_vec(x, name):
         t = torch.as_tensor(x, device=device, dtype=dtype)
         if t.ndim == 0:
-            t = t.expand(3)
-        elif t.shape != (3,):
-            raise ValueError(f"{name} must be scalar or shape [3], got {tuple(t.shape)}")
+            t = t.expand(K)
+        elif t.shape != (K,):
+            raise ValueError(f"{name} must be scalar or shape [{K}], got {tuple(t.shape)}")
         return t
 
-    sigma_v = _as_axis_vec(sigma, "sigma")               # [3]
-    sigma_root_v = _as_axis_vec(sigma_root, "sigma_root")  # [3]
-    mu_v = _as_axis_vec(mu, "mu")                          # [3]
+    sigma_v = _as_axis_vec(sigma, "sigma")               # [K]
+    sigma_root_v = _as_axis_vec(sigma_root, "sigma_root")  # [K]
+    mu_v = _as_axis_vec(mu, "mu")                          # [K]
 
     inv_var = 1.0 / (sigma_v * sigma_v)                    # [3]
     inv_var_root = 1.0 / (sigma_root_v * sigma_root_v)     # [3]

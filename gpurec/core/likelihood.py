@@ -184,17 +184,65 @@ def E_fixed_point(species_helpers,
 # Log-likelihood
 # =========================================================================
 
-def compute_log_likelihood(Pi, E, root_clade_idx):
+def compute_log_likelihood(Pi, E, root_clade_idx, log_pO=None):
     """Computes log-likelihood in a batched way over the number
     of gene families.
     Output has shape len(root_clade_idx).
-    Result is in log2 units (bits)."""
+    Result is in log2 units (bits).
+
+    ORIGINATION (matching AleRax ``UndatedDTLMultiModel``): a gene family
+    originates on species branch ``e`` with probability ``p^O_e`` (``_OP[e]``).
+    Origination enters BOTH the numerator (the survival-conditioned reconciliation
+    sum) and the survival/observability denominator:
+
+        P = [Σ_e p^O_e · Π(root, e)] / [Σ_e p^O_e · (1 − E_e)]
+
+    ``log_pO`` (optional, shape [S] or broadcastable to Pi/E's batch dims) is
+    ``log2(p^O_e)``, the per-branch origination log-probability. It is a proper
+    distribution over branches (Σ_e p^O_e = 1). When ``log_pO`` is given:
+
+        numerator   = logsumexp2(Pi[root, :] + log_pO, dim=-1)
+        denominator = logsumexp2(log2(1 − exp2(E)) + log_pO, dim=-1)
+
+    When ``log_pO`` is ``None`` the original UNIFORM path is used EXACTLY
+    (p^O_e = 1/S, i.e. log_pO = −log2(S)); this branch is byte-identical to the
+    pre-origination implementation. Origination affects ONLY this final
+    likelihood — never the E or Π fixed-point recursions.
+    """
 
     # This will broadcast if root_clade_idx has shape [N_gene_trees]
     root_probs = Pi[root_clade_idx, :]
-    # We remove log2(|S|) because we assume a uniform prior over the root species
-    numerator = logsumexp2(root_probs, dim=-1) - math.log2(Pi.shape[-1])
-    # Will still work if E has shape [N_gene_trees, S]
-    denominator = torch.log2((1-torch.exp2(E).mean(dim=-1)))
+    if log_pO is None:
+        # UNIFORM (legacy) path — kept byte-identical to before.
+        # We remove log2(|S|) because we assume a uniform prior over the root species
+        numerator = logsumexp2(root_probs, dim=-1) - math.log2(Pi.shape[-1])
+        # Will still work if E has shape [N_gene_trees, S]
+        denominator = torch.log2((1-torch.exp2(E).mean(dim=-1)))
+        return -(numerator - denominator)
+
+    # ORIGINATION path: weight each species branch by p^O_e = exp2(log_pO_e).
+    # log_pO broadcasts with root_probs (numerator) and E (denominator).
+    numerator = logsumexp2(root_probs + log_pO, dim=-1)
+    # log2(1 - exp2(E)): reuse the existing 1 - exp2(E) computation, but keep it
+    # per-branch (no mean) so it can be origination-weighted. _safe_log2 guards
+    # E -> 0 (full extinction) where 1 - exp2(E) -> 0 (returns -inf, not NaN).
+    log_one_minus_E = _safe_log2(1.0 - torch.exp2(E))
+    denominator = logsumexp2(log_one_minus_E + log_pO, dim=-1)
     return -(numerator - denominator)
+
+
+def origination_log_pO(omega):
+    """Map origination log2-weights ``omega`` [S] to the normalised per-branch
+    origination log-probability ``log_pO`` = ``omega − logsumexp2(omega)``.
+
+    ``omega`` is the optimisable ORIGINATION parameter (Step 2). The per-branch
+    origination probability is the softmax over branches:
+
+        p^O_e = 2^omega_e / Σ_e 2^omega_e   ==>   log_pO_e = omega_e − logsumexp2(omega)
+
+    The UNIFORM strategy corresponds to ``omega = const`` (any constant), giving
+    ``log_pO_e = −log2(S)``. The "O" rate AleRax reports is the normalised
+    probability ``p^O_e = exp2(log_pO_e)`` (see ``run_williams_branchwise.py``).
+    """
+    return omega - logsumexp2(omega, dim=-1, keepdim=True)
 

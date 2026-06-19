@@ -87,6 +87,11 @@ def optimize_theta_wave(
     brownian_mu=None,
     parent_index: torch.Tensor | None = None,
     theta_bounds=None,
+    origination: str = 'uniform',
+    omega_init: torch.Tensor | None = None,
+    origination_sigma=None,
+    origination_root_sigma: float = 5.0,
+    origination_mu: float = 0.0,
 ):
     """Optimize theta using wave forward/backward + implicit gradient.
 
@@ -164,10 +169,40 @@ def optimize_theta_wave(
         AleRax-style. ``(lo, hi)`` scalars applied to every element, or a tuple
         of two arrays broadcastable to the flattened theta. None (default) keeps
         the current behavior (lower bound = log2(1e-10), no upper bound).
+    origination : str
+        ORIGINATION strategy (matching AleRax). 'uniform' (default): every species
+        branch originates with equal probability p^O_e = 1/S (omega absent;
+        byte-identical to before). 'optimize': a FREE per-branch origination
+        log2-weight ``omega`` [S] is jointly optimised with theta. The per-branch
+        origination probability is the softmax p^O_e = 2^omega_e / Σ_e 2^omega_e
+        (log_pO = omega - logsumexp2(omega)), which enters compute_log_likelihood's
+        numerator AND survival denominator. Only the L-BFGS path supports
+        'optimize': the scipy vector becomes [theta_flat (3S or S*3); omega (S)],
+        the implicit theta gradient uses the origination-weighted seeds, and the
+        omega gradient is the DIRECT ∂(Σ NLL)/∂omega at fixed Pi, E.
+    omega_init : Tensor [S] | None
+        Initial origination log2-weights (only used when origination='optimize').
+        None (default) -> omega = 0 (uniform p^O_e = 1/S).
+    origination_sigma : float | None
+        Std (log2 units) of a time-uniform TKP Brownian prior coupling adjacent
+        branches' origination log2-weights ``omega`` along the species tree
+        (the same prior used for the DTL rates, applied to omega [S,1]). None
+        (default) leaves origination FREE/unregularized. Small sigma -> omega
+        smoothed toward a constant -> p^O_e -> uniform (1/S), matching AleRax's
+        near-constant origination column. Only used when origination='optimize'.
+        The Brownian increment penalty is shift-invariant, so it respects the
+        softmax gauge; the root anchor pins the otherwise-free global shift.
+    origination_root_sigma : float
+        Root-anchor std (log2 units) for the omega prior. Default 5.0.
+    origination_mu : float
+        Root-anchor centre (log2 units) for the omega prior. Default 0.0 (the
+        anchor value is a gauge choice; softmax makes any global shift a no-op).
 
     Returns
     -------
     dict with 'theta', 'rates', 'log_likelihood', 'negative_log_likelihood', 'history'.
+    When origination='optimize', also 'omega' [S] (log2-weights) and 'origination'
+    [S] (normalised p^O_e).
     """
     if device is None:
         device = theta_init.device
@@ -182,6 +217,33 @@ def optimize_theta_wave(
 
     _THETA_MIN = math.log2(1e-10)
 
+    # --- ORIGINATION setup --------------------------------------------------
+    # 'uniform' (default): omega absent, log_pO=None everywhere -> byte-identical
+    #   to the pre-origination path (uniform p^O_e = 1/S).
+    # 'optimize': a free per-branch origination log2-weight omega [S] is jointly
+    #   optimised; log_pO = omega - logsumexp2(omega) is the softmax log-prob.
+    from gpurec.core.likelihood import origination_log_pO as _origination_log_pO
+    if origination not in ('uniform', 'optimize'):
+        raise ValueError(f"origination must be 'uniform' or 'optimize', got {origination!r}")
+    _opt_origination = origination == 'optimize'
+    # Determine S (number of species branches) for the omega vector.
+    _S_branches = int(species_helpers['S'])
+    if _opt_origination:
+        if omega_init is None:
+            _omega0 = torch.zeros(_S_branches, dtype=dtype, device=device)
+        else:
+            _omega0 = omega_init.to(device=device, dtype=dtype).reshape(-1).clone()
+        if _omega0.numel() != _S_branches:
+            raise ValueError(
+                f"omega_init must have S={_S_branches} entries, got {_omega0.numel()}"
+            )
+        if optimizer != 'lbfgs':
+            raise NotImplementedError(
+                "origination='optimize' is only supported with optimizer='lbfgs'"
+            )
+    else:
+        _omega0 = None
+
     # --- Brownian (TKP) rate prior setup -----------------------------------
     # Only meaningful for specieswise theta [S,3]; skip otherwise so the
     # global/genewise paths stay byte-identical.
@@ -191,19 +253,32 @@ def optimize_theta_wave(
             print("  [brownian prior requested but theta is not specieswise [S,3]; "
                   "skipping prior]", flush=True)
         _use_prior = False
+
+    # Optional Brownian prior on the per-branch origination log2-weights omega.
+    # Regularizes the FREE per-branch origination (otherwise as unidentifiable
+    # as free per-branch loss) by coupling adjacent branches along the species
+    # tree -- the SAME prior, applied to omega reshaped [S,1].
+    _use_orig_prior = _opt_origination and (origination_sigma is not None)
+
+    _brownian_prior = None
     _prior_parent_index = None
     _prior_sigma = None
     _prior_root_sigma = None
     _prior_mu = None
-    if _use_prior:
+    _orig_sigma = None
+    _orig_root_sigma = None
+    _orig_mu = None
+    if _use_prior or _use_orig_prior:
         from gpurec.core.tree_prior import (
             brownian_log_prior_and_grad as _brownian_prior,
             species_parent_index as _species_parent_index,
         )
+        # Shared species-tree parent index (both priors live on the same tree).
         if parent_index is None:
             _prior_parent_index = _species_parent_index(species_helpers).to(device)
         else:
             _prior_parent_index = parent_index.to(device=device, dtype=torch.long)
+    if _use_prior:
         _prior_sigma = brownian_sigma
         _prior_root_sigma = brownian_root_sigma
         # Default root-anchor centre = theta_init root row (== log2(init_rate)
@@ -216,6 +291,10 @@ def optimize_theta_wave(
             _prior_mu = _ti[int(_root_ids[0].item())].clone()
         else:
             _prior_mu = brownian_mu
+    if _use_orig_prior:
+        _orig_sigma = float(origination_sigma)
+        _orig_root_sigma = float(origination_root_sigma)
+        _orig_mu = float(origination_mu)
 
     def _apply_prior(theta_d, nll, grad_theta):
         """Add the Brownian penalty to nll and its gradient to grad_theta."""
@@ -225,6 +304,16 @@ def optimize_theta_wave(
             theta_d, _prior_parent_index, _prior_sigma, _prior_root_sigma, _prior_mu,
         )
         return nll + float(penalty.item()), grad_theta + p_grad
+
+    def _apply_origination_prior(omega_d, nll, grad_omega):
+        """Add the Brownian penalty on omega [S,1] to nll and grad_omega [S]."""
+        if not _use_orig_prior or omega_d is None or grad_omega is None:
+            return nll, grad_omega
+        penalty, p_grad = _brownian_prior(
+            omega_d.reshape(-1, 1), _prior_parent_index,
+            _orig_sigma, _orig_root_sigma, _orig_mu,
+        )
+        return nll + float(penalty.item()), grad_omega + p_grad.reshape(-1)
 
     # Precompute ancestors_T for uniform mode
     _ancestors_T = None
@@ -326,8 +415,18 @@ def optimize_theta_wave(
             )
         return log_pS, log_pD, log_pL, transfer_mat, mt
 
-    def _forward_backward(theta_d, warm_E, selected_batch_ids=None):
-        """Full forward + backward: returns (nll, grad_theta, history_record, warm_E)."""
+    def _forward_backward(theta_d, warm_E, selected_batch_ids=None, omega_d=None):
+        """Full forward + backward.
+
+        Returns (nll, grad_theta, statsG, E_out) when origination is uniform, and
+        (nll, grad_theta, statsG, E_out, grad_omega) when omega_d is provided
+        (origination='optimize'). ``grad_omega`` [S] is the DIRECT ∂(Σ NLL)/∂omega
+        at FIXED Pi, E (no implicit solve): origination only enters
+        compute_log_likelihood, so its omega gradient is a cheap autograd through
+        the per-family numerators + the shared (E + omega) survival denominator.
+        """
+        # Origination log-prob log_pO = omega - logsumexp2(omega). None -> uniform.
+        log_pO = _origination_log_pO(omega_d) if omega_d is not None else None
         if wave_layout_batches is not None:
             if selected_batch_ids is None:
                 layout_batches = wave_layout_batches
@@ -385,6 +484,10 @@ def optimize_theta_wave(
             pi_phase_time = 0.0
             grad_phase_time = 0.0
             n_batch_accum = 0
+            # Origination: collect each family's root-clade Pi row [n_fam_b, S] so
+            # the DIRECT omega gradient can be computed once (per-family numerators
+            # + the shared survival denominator) after the wave loop.
+            root_pi_rows = [] if log_pO is not None else None
 
             for _batch_idx, (wl_b, roots_b) in enumerate(layout_batches):
                 t_pi_b0 = time.perf_counter()
@@ -398,8 +501,13 @@ def optimize_theta_wave(
                         device=device, dtype=dtype, pibar_mode=pibar_mode,
                         leaf_obs_log=leaf_obs_log,
                     )
-                    logL_b = compute_log_likelihood(Pi_out_b['Pi'], E_out['E'], roots_b)
+                    logL_b = compute_log_likelihood(
+                        Pi_out_b['Pi'], E_out['E'], roots_b, log_pO=log_pO,
+                    )
                     nll += float(logL_b.sum().item())
+                    if root_pi_rows is not None:
+                        # Detach: the omega gradient is evaluated at FIXED Pi.
+                        root_pi_rows.append(Pi_out_b['Pi'][roots_b, :].detach())
                 except torch.OutOfMemoryError as exc:
                     raise torch.OutOfMemoryError(
                         f"OOM in optimize_theta_wave phase=Pi_wave_forward; "
@@ -442,6 +550,7 @@ def optimize_theta_wave(
                         ancestors_T=_ancestors_T,
                         leaf_E=leaf_E,
                         leaf_obs_log=leaf_obs_log,
+                        log_pO=log_pO,
                     )
                 except torch.OutOfMemoryError as exc:
                     raise torch.OutOfMemoryError(
@@ -470,6 +579,33 @@ def optimize_theta_wave(
             if n_batch_accum > 0:
                 grad_theta = grad_theta / float(n_batch_accum)
 
+            # --- DIRECT omega gradient (origination='optimize') --------------
+            # omega enters ONLY compute_log_likelihood, so ∂(Σ NLL)/∂omega at FIXED
+            # Pi, E is a direct autograd through the (origination-weighted)
+            # per-family numerators and the shared survival denominator — no
+            # implicit solve. Mirrors compute_log_likelihood EXACTLY:
+            #   NLL_f = -(logsumexp2(root_Pi_f + log_pO) - logsumexp2(log2(1-exp2(E)) + log_pO))
+            grad_omega = None
+            if log_pO is not None:
+                from gpurec.core.log2_utils import logsumexp2 as _lse2
+                from gpurec.core.log2_utils import _safe_log2_internal as _slog2
+                root_pi_all = torch.cat(root_pi_rows, dim=0)  # [n_fam_total, S]
+                n_fam_total = root_pi_all.shape[0]
+                E_det = E_out['E'].detach()
+                # log2(1 - exp2(E)) with E -> 0 guarded (matches compute_log_likelihood).
+                log_one_minus_E = _slog2(1.0 - torch.exp2(E_det))
+                with torch.enable_grad():
+                    omega_leaf = omega_d.detach().clone().requires_grad_(True)
+                    log_pO_g = omega_leaf - _lse2(omega_leaf, dim=-1, keepdim=True)
+                    num = _lse2(root_pi_all + log_pO_g, dim=-1)          # [n_fam_total]
+                    denom = _lse2(log_one_minus_E + log_pO_g, dim=-1)    # scalar (shared E)
+                    nll_omega = -(num - denom).sum()                     # Σ_f NLL_f
+                    grad_omega = torch.autograd.grad(nll_omega, omega_leaf)[0].detach()
+                # Match the theta gradient's family-batch averaging so the two
+                # blocks of the joint scipy gradient are on the same scale.
+                if n_batch_accum > 0:
+                    grad_omega = grad_omega / float(n_batch_accum)
+
             if stats_list:
                 method0 = stats_list[0].method
                 method = method0 if all(s.method == method0 for s in stats_list) else "mixed"
@@ -493,6 +629,8 @@ def optimize_theta_wave(
                   f"  [Pi_bwd={pi_bwd_t:.3f}s  CG={cg_t:.3f}s  theta_vjp={theta_t:.3f}s]",
                   flush=True)
 
+        if omega_d is not None:
+            return nll, grad_theta, statsG, E_out, grad_omega
         return nll, grad_theta, statsG, E_out
 
     # --- L-BFGS-B path (scipy) ---
@@ -502,17 +640,32 @@ def optimize_theta_wave(
 
         theta_t = theta_init.to(device=device, dtype=dtype).clone()
         theta_shape = theta_t.shape
+        n_theta = theta_t.numel()
         history: List[StepRecord] = []
         warm_E_ref = [None]
         eval_count = [0]
 
-        def forward_and_grad(theta_flat_np):
-            theta_flat = torch.from_numpy(theta_flat_np).to(device=device, dtype=dtype)
+        def forward_and_grad(x_flat_np):
+            # JOINT vector layout: [theta_flat (n_theta); omega (S)] when origination
+            # is optimised, else just theta_flat. Split, run, re-concat the gradient.
+            x_flat = torch.from_numpy(x_flat_np).to(device=device, dtype=dtype)
+            theta_flat = x_flat[:n_theta]
             theta_d = theta_flat.reshape(theta_shape).clamp(min=_THETA_MIN)
+            if _opt_origination:
+                omega_d = x_flat[n_theta:].reshape(_S_branches)
+            else:
+                omega_d = None
 
             t_start = time.perf_counter()
-            nll, grad_theta, statsG, E_out = _forward_backward(theta_d, warm_E_ref[0])
+            if _opt_origination:
+                nll, grad_theta, statsG, E_out, grad_omega = _forward_backward(
+                    theta_d, warm_E_ref[0], omega_d=omega_d,
+                )
+            else:
+                nll, grad_theta, statsG, E_out = _forward_backward(theta_d, warm_E_ref[0])
+                grad_omega = None
             nll, grad_theta = _apply_prior(theta_d, nll, grad_theta)
+            nll, grad_omega = _apply_origination_prior(omega_d, nll, grad_omega)
             step_time = time.perf_counter() - t_start
             warm_E_ref[0] = E_out['E'].detach()
 
@@ -538,30 +691,50 @@ def optimize_theta_wave(
                 step_time_s=step_time,
             ))
 
-            grad_np = grad_theta.reshape(-1).cpu().to(torch.float64).numpy()
+            grad_theta_np = grad_theta.reshape(-1).cpu().to(torch.float64).numpy()
+            if grad_omega is not None:
+                grad_omega_np = grad_omega.reshape(-1).cpu().to(torch.float64).numpy()
+                grad_np = np.concatenate([grad_theta_np, grad_omega_np])
+            else:
+                grad_np = grad_theta_np
             np.nan_to_num(grad_np, copy=False, nan=0.0)
             # Return +inf (not NaN) so scipy's line search backtracks instead of corrupting state
             return_nll = float('inf') if nll_is_nan else float(nll)
             return return_nll, grad_np
 
-        x0 = theta_t.reshape(-1).cpu().to(torch.float64).numpy()
+        theta_x0 = theta_t.reshape(-1).cpu().to(torch.float64).numpy()
         if theta_bounds is None:
             # Current behavior: lower bound = log2(1e-10), no upper bound.
-            bounds = [(_THETA_MIN, None)] * len(x0)
+            theta_bounds_list = [(_THETA_MIN, None)] * len(theta_x0)
         else:
             # AleRax-style box constraints (log2 units). Accept scalar (lo, hi)
-            # applied to every element, or per-element arrays broadcastable to x0.
+            # applied to every element, or per-element arrays broadcastable to theta.
             lo_in, hi_in = theta_bounds
-            lo_arr = np.broadcast_to(np.asarray(lo_in, dtype=np.float64), x0.shape)
-            hi_arr = np.broadcast_to(np.asarray(hi_in, dtype=np.float64), x0.shape)
-            bounds = [(float(lo_arr[i]), float(hi_arr[i])) for i in range(len(x0))]
+            lo_arr = np.broadcast_to(np.asarray(lo_in, dtype=np.float64), theta_x0.shape)
+            hi_arr = np.broadcast_to(np.asarray(hi_in, dtype=np.float64), theta_x0.shape)
+            theta_bounds_list = [(float(lo_arr[i]), float(hi_arr[i])) for i in range(len(theta_x0))]
+        if _opt_origination:
+            # Append omega block. omega is a softmax LOGIT (shift-invariant), so it
+            # is UNBOUNDED — the normalisation in log_pO = omega - logsumexp2(omega)
+            # makes any global shift a no-op. Leave omega unconstrained.
+            omega_x0 = _omega0.reshape(-1).cpu().to(torch.float64).numpy()
+            x0 = np.concatenate([theta_x0, omega_x0])
+            bounds = theta_bounds_list + [(None, None)] * len(omega_x0)
+        else:
+            x0 = theta_x0
+            bounds = theta_bounds_list
         result = scipy_minimize(
             forward_and_grad, x0, method='L-BFGS-B', jac=True,
             bounds=bounds,
             options={'maxiter': steps, 'maxfun': steps * 3, 'ftol': 1e-12, 'gtol': 1e-6},
         )
 
-        theta_final = torch.from_numpy(result.x).to(device=device, dtype=dtype).reshape(theta_shape)
+        x_final = torch.from_numpy(result.x).to(device=device, dtype=dtype)
+        theta_final = x_final[:n_theta].reshape(theta_shape)
+        if _opt_origination:
+            omega_final = x_final[n_theta:].reshape(_S_branches)
+        else:
+            omega_final = None
 
         # Detect float32 precision floor and retry in float64
         if dtype == torch.float32 and len(history) >= 5:
@@ -624,19 +797,50 @@ def optimize_theta_wave(
                     brownian_mu=_prior_mu if _use_prior else brownian_mu,
                     parent_index=_prior_parent_index if _use_prior else parent_index,
                     theta_bounds=theta_bounds,
+                    origination=origination,
+                    omega_init=omega_final if _opt_origination else None,
+                    origination_sigma=origination_sigma,
+                    origination_root_sigma=origination_root_sigma,
+                    origination_mu=origination_mu,
                 )
                 # Merge histories: float32 phase first, then float64 phase
                 result64["history"] = history + result64["history"]
                 return result64
 
-        return {
+        # Pure DATA negative-log-likelihood at the optimum, with the prior EXCLUDED.
+        # `result.fun` is the MAP objective (data NLL + Brownian penalty); the penalty
+        # depends on the species-tree topology, so it must NOT be in cross-root
+        # likelihood (rooting) comparisons. Re-evaluate the forward once at the optimum
+        # (with the optimised omega so the origination-weighted likelihood is used).
+        _data_nll = float(_forward_backward(
+            theta_final.to(device=device, dtype=dtype), None,
+            omega_d=omega_final,
+        )[0])
+
+        result_dict = {
             "theta": theta_final.cpu(),
             "rates": torch.exp2(theta_final).cpu(),
             "negative_log_likelihood": result.fun,
             "log_likelihood": -result.fun,
+            "data_negative_log_likelihood": _data_nll,
+            "data_log_likelihood": -_data_nll,
             "history": history,
             "scipy_result": result,
         }
+        if _opt_origination:
+            # omega = origination log2-weights; origination = normalised p^O_e.
+            result_dict["omega"] = omega_final.detach().cpu()
+            result_dict["origination"] = torch.exp2(
+                _origination_log_pO(omega_final)
+            ).detach().cpu()
+            result_dict["origination_strategy"] = origination
+            if _use_orig_prior:
+                result_dict["origination_prior"] = {
+                    "sigma": _orig_sigma,
+                    "root_sigma": _orig_root_sigma,
+                    "mu": _orig_mu,
+                }
+        return result_dict
 
     # --- Iterative optimizers (adam, sgd) ---
     theta = torch.nn.Parameter(theta_init.to(device=device, dtype=dtype).clone())

@@ -613,16 +613,50 @@ def _run(args, data_dir: Path):
             "theta_bounds_log2": [theta_lo, theta_hi],
         }
 
+    # --- ORIGINATION (uniform | optimize) -----------------------------------
+    # 'uniform' (default): p^O_e = 1/S for every branch (omega absent) ->
+    #   byte-identical to the pre-origination driver run.
+    # 'optimize': jointly optimise a free per-branch origination log2-weight
+    #   omega [S] (init 0 = uniform); the reported "O" column is the normalised
+    #   p^O_e = softmax(omega).
+    omega_init = None
+    origination_info = {"origination": args.origination}
+    origination_sigma = None
+    origination_root_sigma = args.origination_root_sigma
+    if args.origination == "optimize":
+        omega_init = torch.zeros(S, dtype=dtype, device=device)  # uniform init
+        # Prior on omega: explicit --origination-sigma wins; else, if a Brownian
+        # rate prior is on, regularize origination at the SAME stiffness by
+        # default (free per-branch origination is otherwise unidentifiable).
+        if args.origination_sigma is not None:
+            origination_sigma = float(args.origination_sigma)
+        elif args.prior == "brownian":
+            origination_sigma = float(args.brownian_sigma)
+        if origination_sigma is not None:
+            origination_info.update({
+                "origination_sigma": origination_sigma,
+                "origination_root_sigma": origination_root_sigma,
+                "units": "log2",
+            })
+
     print(f"[5/5] Optimizing specieswise theta [S={S},3]  "
           f"(init-rate={args.init_rate}, optimizer={args.optimizer}, "
           f"pibar={args.pibar_mode}, dtype={args.dtype}, steps={args.steps}, "
-          f"fm-mode={args.fm_mode}) ...",
+          f"fm-mode={args.fm_mode}, origination={args.origination}) ...",
           flush=True)
     if args.prior == "brownian":
         print(f"      prior=brownian  sigma={brownian_sigma} (all axes, log2)  "
               f"root_sigma={brownian_root_sigma} (log2)", flush=True)
     else:
         print(f"      prior=none (free per-branch rates)", flush=True)
+    if args.origination == "optimize":
+        if origination_sigma is not None:
+            print(f"      origination=optimize  WITH Brownian prior on omega: "
+                  f"sigma={origination_sigma} (log2)  "
+                  f"root_sigma={origination_root_sigma} (log2)", flush=True)
+        else:
+            print(f"      origination=optimize  (FREE per-branch omega, no prior)",
+                  flush=True)
     if theta_bounds is not None:
         print(f"      rate-bounds (AleRax-style box) = [{bounds_info['rate_bounds'][0]:g}, "
               f"{bounds_info['rate_bounds'][1]:g}]  -> theta in "
@@ -649,13 +683,37 @@ def _run(args, data_dir: Path):
         brownian_root_sigma=brownian_root_sigma,
         parent_index=parent_index,
         theta_bounds=theta_bounds,
+        origination=args.origination,
+        omega_init=omega_init,
+        origination_sigma=origination_sigma,
+        origination_root_sigma=origination_root_sigma,
     )
     elapsed = time.time() - t0
 
     theta = result["theta"]              # [S,3] log2
     rates = result["rates"]              # [S,3] = 2**theta, cols [D,L,T]
-    nll = float(result["negative_log_likelihood"])
+    # ORIGINATION: per-branch normalised origination probability p^O_e (the "O"
+    # column). For 'uniform' it is exactly 1/S on every branch.
+    if args.origination == "optimize":
+        origination_prob = result["origination"]  # [S] normalised p^O_e
+        omega = result["omega"]                    # [S] log2-weights
+        # Preserve the prior fields set during setup; add the fitted values.
+        origination_info.update({
+            "origination": "optimize",
+            "omega_log2": omega.tolist(),
+            "origination_prob": origination_prob.tolist(),
+        })
+        if "origination_prior" in result:
+            origination_info["prior"] = result["origination_prior"]
+    else:
+        origination_prob = torch.full((S,), 1.0 / S, dtype=torch.float64)
+        omega = None
+    nll = float(result["negative_log_likelihood"])       # MAP objective (data + prior)
     logL = float(result["log_likelihood"])
+    # DATA log-likelihood (prior excluded) -- the quantity for cross-root rooting
+    # comparisons, since the Brownian penalty depends on the tree topology.
+    data_nll = float(result.get("data_negative_log_likelihood", nll))
+    data_logL = -data_nll
 
     # Rate summary across branches.
     def _mmm(col):
@@ -665,20 +723,36 @@ def _run(args, data_dir: Path):
     print(f"\n{'=' * 60}")
     print(f"  DONE  root={args.root}  families={len(families)}  "
           f"time={elapsed:.1f}s")
-    print(f"  NLL(log2)={nll:.4f}   logL(log2)={logL:.4f}")
+    print(f"  NLL(log2)={nll:.4f}   logL(log2)={logL:.4f}   data_logL(log2)={data_logL:.4f}")
     for col, lab in ((0, "D"), (1, "L"), (2, "T")):
         lo, md, hi = _mmm(col)
         print(f"  {lab}: min={lo:.6g}  median={md:.6g}  max={hi:.6g}")
     print(f"{'=' * 60}")
 
+    # Print origination summary.
+    if args.origination == "optimize":
+        o = origination_prob
+        print(f"  O (p^O_e): min={float(o.min()):.6g}  median={float(o.median()):.6g}  "
+              f"max={float(o.max()):.6g}  (sum={float(o.sum()):.6g})")
+        print(f"{'=' * 60}")
+
     # Write rates (AleRax model_parameters-compatible) + JSON sidecar.
+    # With origination='optimize' a 5th column O = p^O_e (normalised origination
+    # probability) is appended; 'uniform' keeps the byte-identical D/L/T format.
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w") as fh:
-        fh.write("# node D L T\n")
-        for s in range(S):
-            d, l, t = float(rates[s, 0]), float(rates[s, 1]), float(rates[s, 2])
-            fh.write(f"{names[s]} {d:.10g} {l:.10g} {t:.10g}\n")
+        if args.origination == "optimize":
+            fh.write("# node D L T O\n")
+            for s in range(S):
+                d, l, t = float(rates[s, 0]), float(rates[s, 1]), float(rates[s, 2])
+                o = float(origination_prob[s])
+                fh.write(f"{names[s]} {d:.10g} {l:.10g} {t:.10g} {o:.10g}\n")
+        else:
+            fh.write("# node D L T\n")
+            for s in range(S):
+                d, l, t = float(rates[s, 0]), float(rates[s, 1]), float(rates[s, 2])
+                fh.write(f"{names[s]} {d:.10g} {l:.10g} {t:.10g}\n")
     print(f"  rates written -> {out_path}")
 
     sidecar = out_path.with_suffix(out_path.suffix + ".json")
@@ -702,9 +776,13 @@ def _run(args, data_dir: Path):
         "fraction_missing": fm_info,
         "prior": prior_info,
         "bounds": bounds_info,
+        "origination": origination_info,
         "negative_log_likelihood_log2": nll,
         "log_likelihood_log2": logL,
         "negative_log_likelihood_ln": nll * math.log(2.0),
+        "data_log_likelihood_log2": data_logL,
+        "data_log_likelihood_ln": data_logL * math.log(2.0),
+        "data_negative_log_likelihood_log2": data_nll,
         "theta_log2": theta.tolist(),
         "rates": rates.tolist(),
         "elapsed_s": elapsed,
@@ -760,6 +838,14 @@ def _parse_args(argv=None):
                         "leaf_obs_log=None). 'off': disable everywhere "
                         "(leaf_E=None, leaf_obs_log=None). "
                         "--no-fraction-missing forces 'off'.")
+    p.add_argument("--origination", default="uniform",
+                   choices=["uniform", "optimize"],
+                   help="ORIGINATION strategy (AleRax). 'uniform' (default): "
+                        "p^O_e = 1/S on every branch (byte-identical to before). "
+                        "'optimize': jointly optimise a free per-branch origination "
+                        "log2-weight omega [S] (init uniform); the reported O column "
+                        "is the normalised p^O_e = softmax(omega). Requires "
+                        "optimizer=lbfgs.")
     p.add_argument("--prior", default="none", choices=["none", "brownian"],
                    help="Rate prior: 'none' (free per-branch) or 'brownian' "
                         "(time-uniform TKP relaxed clock coupling adjacent "
@@ -770,6 +856,18 @@ def _parse_args(argv=None):
     p.add_argument("--brownian-root-sigma", type=float, default=5.0,
                    help="Root-anchor std (log2 units) for prior propriety. "
                         "Default: 5.0")
+    p.add_argument("--origination-sigma", type=float, default=None,
+                   help="Std (log2 units) of a Brownian prior on the per-branch "
+                        "origination log2-weights omega (same TKP prior as the "
+                        "rates, coupling adjacent branches). Only used with "
+                        "--origination optimize. Default: None -> if --prior "
+                        "brownian, falls back to --brownian-sigma (regularize "
+                        "origination at the same stiffness); otherwise origination "
+                        "is left free. Smaller -> omega smoothed toward uniform "
+                        "p^O_e (matching AleRax's near-constant origination).")
+    p.add_argument("--origination-root-sigma", type=float, default=5.0,
+                   help="Root-anchor std (log2 units) for the omega prior "
+                        "(gauge fix for the shift-invariant softmax). Default: 5.0")
     p.add_argument("--rate-bounds", default=None,
                    help="AleRax-style box bounds on LINEAR rates as 'MIN,MAX' "
                         "(e.g. '1e-10,10'); converted to theta (log2) bounds and "
