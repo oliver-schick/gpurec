@@ -494,6 +494,39 @@ def _run(args, data_dir: Path):
     sp_name_to_idx = species_helpers["species_name_to_index"]
     print(f"      S={S} species nodes", flush=True)
 
+    # Optional: CLADE-GROUPED ("branch wise") model from AleRax's output.
+    group_index = None
+    group_info = {"clade_groups": None}
+    if args.clade_groups:
+        from clade_groups import group_index_for_species_helpers
+        cg_dir = Path(args.clade_groups)
+        cg_tree = cg_dir / "species_trees" / "starting_species_tree.newick"
+        cg_mp = cg_dir / "model_parameters" / "model_parameters.txt"
+        if not cg_tree.exists() or not cg_mp.exists():
+            raise SystemExit(
+                f"--clade-groups dir must contain species_trees/"
+                f"starting_species_tree.newick and model_parameters/"
+                f"model_parameters.txt; got {cg_dir}"
+            )
+        group_index, cat_rates, cat_orig, cg_diag = group_index_for_species_helpers(
+            species_helpers, str(cg_tree), str(cg_mp)
+        )
+        if cg_diag["gpurec_unmapped"]:
+            raise SystemExit(
+                f"clade-groups: {len(cg_diag['gpurec_unmapped'])} gpurec nodes "
+                f"could not be mapped to an AleRax category by leaf set "
+                f"(tree/topology mismatch?): {cg_diag['gpurec_unmapped'][:5]}"
+            )
+        n_groups = int(group_index.max().item()) + 1
+        group_info = {
+            "clade_groups": str(cg_dir),
+            "n_groups": n_groups,
+            "n_categories_alerax": cg_diag["n_categories"],
+            "matched": cg_diag["matched"],
+        }
+        print(f"      CLADE-GROUPED model: {n_groups} rate categories over "
+              f"S={S} branches (from AleRax branch-wise {cg_dir.name})", flush=True)
+
     # 2. Load families.
     print(f"[2/5] Parsing {len(ale_paths)} .ale families "
           f"(min-species={args.min_species}) ...", flush=True)
@@ -680,6 +713,7 @@ def _run(args, data_dir: Path):
         origination=args.origination,
         omega_init=omega_init,
         origination_l2=origination_l2,
+        group_index=group_index,
     )
     elapsed = time.time() - t0
 
@@ -770,6 +804,7 @@ def _run(args, data_dir: Path):
         "prior": prior_info,
         "bounds": bounds_info,
         "origination": origination_info,
+        "clade_groups": group_info,
         "negative_log_likelihood_log2": nll,
         "log_likelihood_log2": logL,
         "negative_log_likelihood_ln": nll * math.log(2.0),
@@ -867,6 +902,15 @@ def _parse_args(argv=None):
                    help="AleRax-style box bounds on LINEAR rates as 'MIN,MAX' "
                         "(e.g. '1e-10,10'); converted to theta (log2) bounds and "
                         "passed to L-BFGS-B. Default: none (lower bound only).")
+    p.add_argument("--clade-groups", default=None,
+                   help="Replicate AleRax's CLADE-GROUPED 'branch wise' model: "
+                        "path to an AleRax 'branch wise/<root>' dir containing "
+                        "species_trees/starting_species_tree.newick and "
+                        "model_parameters/model_parameters.txt. The ~17 distinct "
+                        "(D,L,T) categories there define a group_index[S] (mapped "
+                        "by descendant leaf set), and gpurec optimizes G grouped "
+                        "rate rows instead of S free per-branch rates. Forces "
+                        "specieswise + prior none. Default: None (free per-branch).")
     p.add_argument("--dtype", default="float64", choices=["float32", "float64"],
                    help="Precision (default: float64)")
     p.add_argument("--out", default=None,

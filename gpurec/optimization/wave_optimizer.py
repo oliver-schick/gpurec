@@ -94,6 +94,7 @@ def optimize_theta_wave(
     origination_mu: float = 0.0,
     origination_decouple_root: bool = True,
     origination_l2: float = 0.0,
+    group_index: torch.Tensor | None = None,
 ):
     """Optimize theta using wave forward/backward + implicit gradient.
 
@@ -218,6 +219,50 @@ def optimize_theta_wave(
         leaf_obs_log = leaf_E
 
     _THETA_MIN = math.log2(1e-10)
+
+    # --- CLADE-GROUPED (rate-category) reparametrization --------------------
+    # When ``group_index`` [S] (long, values 0..G-1) is given, theta is NOT a
+    # free [S,3] per-branch tensor: instead G free rate-category rows theta_g
+    # [G,3] are optimised and EXPANDED to per-branch via theta[s] = theta_g[
+    # group_index[s]]. The gradient is REDUCED back per group by summing the
+    # per-branch grad over each category (chain rule of the expand map). This
+    # replicates AleRax's "branch wise" model, which is NOT 119 free branches
+    # but ~17 named-clade rate categories (the model_parameters file). Only the
+    # L-BFGS path supports grouping; group_index=None (default) is byte-identical
+    # to the per-branch / global behavior. Requires specieswise theta [S,3].
+    _use_groups = group_index is not None
+    _group_index_t = None
+    _n_groups = 0
+    if _use_groups:
+        if not (specieswise and theta_init.ndim == 2 and theta_init.shape[-1] == 3):
+            raise ValueError(
+                "group_index requires specieswise theta [S,3]; "
+                f"got specieswise={specieswise}, theta_init.shape={tuple(theta_init.shape)}"
+            )
+        _group_index_t = group_index.to(device=device, dtype=torch.long).reshape(-1)
+        if _group_index_t.numel() != theta_init.shape[0]:
+            raise ValueError(
+                f"group_index must have S={theta_init.shape[0]} entries, "
+                f"got {_group_index_t.numel()}"
+            )
+        if int(_group_index_t.min().item()) < 0:
+            raise ValueError("group_index entries must be >= 0")
+        _n_groups = int(_group_index_t.max().item()) + 1
+
+    def _expand_theta(theta_param):
+        """[G,3] group rows -> [S,3] per-branch (no-op when not grouped)."""
+        if not _use_groups:
+            return theta_param
+        return theta_param.index_select(0, _group_index_t)
+
+    def _reduce_grad(grad_full):
+        """[S,3] per-branch grad -> [G,3] per-group grad (no-op when not grouped)."""
+        if not _use_groups:
+            return grad_full
+        g = torch.zeros((_n_groups, grad_full.shape[1]),
+                        dtype=grad_full.dtype, device=grad_full.device)
+        g.index_add_(0, _group_index_t, grad_full)
+        return g
 
     # --- ORIGINATION setup --------------------------------------------------
     # 'uniform' (default): omega absent, log_pO=None everywhere -> byte-identical
@@ -638,8 +683,18 @@ def optimize_theta_wave(
         from scipy.optimize import minimize as scipy_minimize
 
         theta_t = theta_init.to(device=device, dtype=dtype).clone()
-        theta_shape = theta_t.shape
-        n_theta = theta_t.numel()
+        if _use_groups:
+            # Reduce the (typically uniform) per-branch init to per-group rows by
+            # averaging members of each category -> [G,3]. This is the FREE param.
+            _cnt = torch.zeros(_n_groups, dtype=dtype, device=device)
+            _cnt.index_add_(0, _group_index_t, torch.ones_like(theta_t[:, 0]))
+            _gsum = torch.zeros((_n_groups, 3), dtype=dtype, device=device)
+            _gsum.index_add_(0, _group_index_t, theta_t)
+            theta_param_t = _gsum / _cnt.clamp(min=1).unsqueeze(1)
+        else:
+            theta_param_t = theta_t
+        theta_shape = theta_param_t.shape   # OPTIMISED param: [G,3] grouped else theta_init.shape
+        n_theta = theta_param_t.numel()
         history: List[StepRecord] = []
         warm_E_ref = [None]
         eval_count = [0]
@@ -649,7 +704,8 @@ def optimize_theta_wave(
             # is optimised, else just theta_flat. Split, run, re-concat the gradient.
             x_flat = torch.from_numpy(x_flat_np).to(device=device, dtype=dtype)
             theta_flat = x_flat[:n_theta]
-            theta_d = theta_flat.reshape(theta_shape).clamp(min=_THETA_MIN)
+            theta_param = theta_flat.reshape(theta_shape).clamp(min=_THETA_MIN)
+            theta_d = _expand_theta(theta_param)   # [G,3]->[S,3] (no-op when ungrouped)
             if _opt_origination:
                 omega_d = x_flat[n_theta:].reshape(_S_branches)
             else:
@@ -665,13 +721,16 @@ def optimize_theta_wave(
                 grad_omega = None
             nll, grad_theta = _apply_prior(theta_d, nll, grad_theta)
             nll, grad_omega = _apply_origination_prior(omega_d, nll, grad_omega)
+            # Reduce the per-branch [S,3] gradient to per-group [G,3] (chain rule
+            # of the expand map); no-op when ungrouped.
+            grad_param = _reduce_grad(grad_theta)
             step_time = time.perf_counter() - t_start
             warm_E_ref[0] = E_out['E'].detach()
 
             nll_is_nan = math.isnan(nll)
             eval_count[0] += 1
             if verbose:
-                grad_inf_str = f"{float(grad_theta.abs().max()):.3e}" if not nll_is_nan else "nan"
+                grad_inf_str = f"{float(grad_param.abs().max()):.3e}" if not nll_is_nan else "nan"
                 nll_str = f"{nll:.4f}" if not nll_is_nan else "nan"
                 e_it = int(E_out['iterations'])
                 print(f"  step {eval_count[0]:3d}/{steps}  NLL={nll_str}  |g|={grad_inf_str}"
@@ -683,14 +742,14 @@ def optimize_theta_wave(
                 rates=torch.exp2(theta_d.detach()).cpu(),
                 negative_log_likelihood=nll, log_likelihood=-nll,
                 theta_step_inf=0.0,
-                grad_infinity_norm=float(grad_theta.abs().max().item()) if not nll_is_nan else float('nan'),
-                fp_info=fp_info, gradient=grad_theta.cpu(),
+                grad_infinity_norm=float(grad_param.abs().max().item()) if not nll_is_nan else float('nan'),
+                fp_info=fp_info, gradient=grad_param.cpu(),
                 solve_stats_F=LinearSolveStats("wave_neumann", neumann_terms, 0.0, False),
                 solve_stats_G=statsG,
                 step_time_s=step_time,
             ))
 
-            grad_theta_np = grad_theta.reshape(-1).cpu().to(torch.float64).numpy()
+            grad_theta_np = grad_param.reshape(-1).cpu().to(torch.float64).numpy()
             if grad_omega is not None:
                 grad_omega_np = grad_omega.reshape(-1).cpu().to(torch.float64).numpy()
                 grad_np = np.concatenate([grad_theta_np, grad_omega_np])
@@ -701,7 +760,7 @@ def optimize_theta_wave(
             return_nll = float('inf') if nll_is_nan else float(nll)
             return return_nll, grad_np
 
-        theta_x0 = theta_t.reshape(-1).cpu().to(torch.float64).numpy()
+        theta_x0 = theta_param_t.reshape(-1).cpu().to(torch.float64).numpy()
         if theta_bounds is None:
             # Current behavior: lower bound = log2(1e-10), no upper bound.
             theta_bounds_list = [(_THETA_MIN, None)] * len(theta_x0)
@@ -729,7 +788,9 @@ def optimize_theta_wave(
         )
 
         x_final = torch.from_numpy(result.x).to(device=device, dtype=dtype)
-        theta_final = x_final[:n_theta].reshape(theta_shape)
+        # Expand grouped [G,3] -> per-branch [S,3] for downstream eval/output
+        # (no-op when ungrouped).
+        theta_final = _expand_theta(x_final[:n_theta].reshape(theta_shape))
         if _opt_origination:
             omega_final = x_final[n_theta:].reshape(_S_branches)
         else:
@@ -803,6 +864,7 @@ def optimize_theta_wave(
                     origination_mu=origination_mu,
                     origination_decouple_root=origination_decouple_root,
                     origination_l2=origination_l2,
+                    group_index=group_index,
                 )
                 # Merge histories: float32 phase first, then float64 phase
                 result64["history"] = history + result64["history"]
