@@ -1,0 +1,421 @@
+"""Branch-wise (per-species-branch) DTL rates + rooting for the BIG TREE
+(This_study / "Undine C60", ~257 taxa, 15 candidate roots), driven by gpurec's
+specieswise wave optimizer.
+
+This is the UFBOOT analogue of ``run_williams_branchwise.py``. Williams ships
+pre-built ALEobserve ``.ale`` CCPs; This_study ships per-family **UFBoot
+bootstrap tree samples** (``3_UFBOOTs/*.ufboot``) instead. gpurec's C++
+amalgamator builds the CCP directly from a multi-tree sample
+(``preprocess_multiple_families(tree, {fam: [ufboot]})`` ->
+``amalgamate_clades_and_splits`` which "handles single-tree or multi-tree CCP"),
+so NO ALEobserve step is needed. Everything downstream of family-building (wave
+layout, fraction-missing, Brownian prior, origination, the specieswise wave
+optimize, the output format) is shared with the Williams driver and imported
+from it, so the two stay in lock-step.
+
+Output matches AleRax ``model_parameters.txt`` (``# node D L T [O]``) + a JSON
+sidecar with the prior-free ``data_log_likelihood_ln`` used for the rooting test.
+
+Run on an A100 (CUDA required for optimize):
+
+    PYTHONPATH=. python experiments/run_undine_branchwise.py --root Eury \
+        --fm-mode e-only --origination optimize --prior brownian --brownian-sigma 1.0
+
+Data-wiring sanity (amalgamate a few ufboots, check species mapping; CPU only):
+
+    PYTHONPATH=. python experiments/run_undine_branchwise.py --root Eury --preflight
+"""
+from __future__ import annotations
+
+import argparse
+import glob
+import json
+import math
+import sys
+import time
+from collections import Counter
+from pathlib import Path
+
+import torch
+
+# Reuse the Williams driver's PURE compute helpers (stable; importing does not
+# run anything heavy and does not touch the in-flight Williams runs).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from run_williams_branchwise import (  # noqa: E402
+    _build_wave_layout,
+    _sp_helpers_for_uniform,
+    _build_leaf_E,
+    _parse_fraction_missing,
+)
+
+_INV_LN2 = 1.0 / math.log(2.0)  # C++ emits ln; CCP probs -> log2 on load.
+
+DEFAULT_DATA_DIR = (
+    "/work/SzollosiU/gergely-szollosi/williams_run/data/"
+    "3_Reconciliation/This_study"
+)
+# The 15 Undine candidate roots (4_species_tree/Undine_C60_<ROOT>root_short_name.nw).
+KNOWN_ROOTS = (
+    "Alti", "AMD", "Asgard", "Cluster2", "DPANN", "Eury", "HalobacThermopl",
+    "Kor", "MHH", "Micra5", "MicraDia", "TACA", "TackA", "TAC", "UndineClu2",
+)
+
+
+# ── paths ─────────────────────────────────────────────────────────────────────
+def _tree_path(data_dir: Path, root: str) -> Path:
+    return data_dir / "4_species_tree" / f"Undine_C60_{root}root_short_name.nw"
+
+
+def _ufboot_paths(data_dir: Path):
+    return sorted(
+        p for p in glob.glob(str(data_dir / "3_UFBOOTs" / "*.ufboot"))
+        if not Path(p).name.startswith("._")
+    )
+
+
+def _fraction_missing_path(data_dir: Path) -> Path:
+    # This_study may or may not ship a fraction_missing file; tolerate absence.
+    return data_dir / "fraction_missing"
+
+
+# ── family loading via the C++ amalgamator (ufboot samples -> CCP) ─────────────
+def _load_species_and_families(tree_path, ufboot_paths, *, min_species, dtype,
+                               limit=0):
+    """Amalgamate UFBoot samples into per-family CCPs + load species helpers.
+
+    Returns (species_helpers, families, stats). ``families`` items match the
+    format ``_build_wave_layout`` / the Williams driver expect.
+    """
+    from gpurec.core.preprocess_cpp import _load_extension
+
+    ext = _load_extension()
+    if limit and limit > 0:
+        ufboot_paths = ufboot_paths[:limit]
+    family_names = [f"family_{i:06d}" for i in range(len(ufboot_paths))]
+    families_input = {n: [str(p)] for n, p in zip(family_names, ufboot_paths)}
+
+    t0 = time.time()
+    raw_all = ext.preprocess_multiple_families(str(tree_path), families_input)
+    species_helpers = raw_all["species"]
+    raw_by_family = raw_all["families"]
+    parse_s = time.time() - t0
+
+    families = []
+    kept = 0
+    dropped_min_species = 0
+    leaf_count_hist: Counter[int] = Counter()
+    for name, path in zip(family_names, ufboot_paths):
+        raw = raw_by_family.get(name)
+        if raw is None:
+            continue
+        ccp = raw["ccp"]
+        # distinct species this family touches = distinct species-tree columns.
+        col = raw["leaf_col_index"]
+        n_species = int(torch.as_tensor(col).unique().numel())
+        leaf_count_hist[n_species] += 1
+        if n_species < min_species:
+            dropped_min_species += 1
+            continue
+        # ln -> log2 (mirror GeneDataset / Williams loader).
+        ccp["log_split_probs_sorted"] = ccp["log_split_probs_sorted"] * _INV_LN2
+        families.append({
+            "ccp_helpers": ccp,
+            "root_clade_id": int(ccp["root_clade_id"]),
+            "leaf_row_index": raw["leaf_row_index"],
+            "leaf_col_index": raw["leaf_col_index"],
+            "C": int(ccp["C"]),
+            "N_splits": int(ccp["N_splits"]),
+        })
+        kept += 1
+
+    stats = {
+        "n_considered": len(ufboot_paths),
+        "kept": kept,
+        "dropped_min_species": dropped_min_species,
+        "parse_seconds": parse_s,
+        "leaf_count_hist": leaf_count_hist,
+    }
+    return species_helpers, families, stats
+
+
+# ── preflight (CPU; amalgamate a few, check species mapping) ───────────────────
+def _preflight(args, data_dir: Path):
+    tree_path = _tree_path(data_dir, args.root)
+    if not tree_path.exists():
+        raise SystemExit(f"species tree not found: {tree_path}")
+    ufboots = _ufboot_paths(data_dir)
+    if not ufboots:
+        raise SystemExit(f"no .ufboot files under {data_dir / '3_UFBOOTs'}")
+    print(f"[preflight] root={args.root}")
+    print(f"  tree   : {tree_path}")
+    print(f"  ufboots: {len(ufboots)} families found")
+    n = min(args.families if args.families > 0 else 50, len(ufboots))
+    print(f"  amalgamating first {n} families (species mapping check) ...",
+          flush=True)
+    sp, fams, stats = _load_species_and_families(
+        tree_path, ufboots[:n], min_species=args.min_species, dtype=torch.float64,
+    )
+    S = int(sp["S"])
+    names = list(sp["names"])
+    sP = sp["s_P_indexes"]
+    internal = sP[sP < S].unique()
+    n_leaves = S - int(internal.numel())
+    print(f"  species tree: S={S} nodes ({n_leaves} leaves)")
+    print(f"  tree leaf labels (first 8): {sorted(names)[:8]}")
+    print(f"  families kept={stats['kept']} dropped(<{args.min_species} sp)="
+          f"{stats['dropped_min_species']}  amalgamate={stats['parse_seconds']:.2f}s")
+    print(f"  per-family #species histogram (low end): "
+          f"{sorted(stats['leaf_count_hist'].items())[:8]}")
+    fm = _fraction_missing_path(data_dir)
+    print(f"  fraction_missing: {'FOUND ' + str(fm) if fm.exists() else 'not present'}")
+    print("PREFLIGHT ok. Re-run without --preflight on an A100 to optimize.")
+    return 0
+
+
+# ── full run ───────────────────────────────────────────────────────────────────
+def _run(args, data_dir: Path):
+    tree_path = _tree_path(data_dir, args.root)
+    if args.root not in KNOWN_ROOTS:
+        print(f"[warn] root {args.root!r} not in known Undine roots {KNOWN_ROOTS}")
+    if not tree_path.exists():
+        raise SystemExit(f"species tree not found: {tree_path}")
+    ufboots = _ufboot_paths(data_dir)
+    if not ufboots:
+        raise SystemExit(f"no .ufboot files under {data_dir / '3_UFBOOTs'}")
+    if not torch.cuda.is_available():
+        raise SystemExit("CUDA required for optimization (run on the A100). "
+                         "Use --preflight for the CPU data-wiring check.")
+    device = torch.device("cuda")
+    dtype = torch.float64 if args.dtype == "float64" else torch.float32
+
+    from gpurec.optimization.wave_optimizer import optimize_theta_wave
+    from gpurec.core.tree_prior import species_parent_index
+
+    print(f"[1/5] Amalgamating {len(ufboots)} UFBoot families on tree "
+          f"{tree_path.name} (min-species={args.min_species}) ...", flush=True)
+    species_helpers, families, stats = _load_species_and_families(
+        tree_path, ufboots, min_species=args.min_species, dtype=dtype,
+        limit=args.families,
+    )
+    S = int(species_helpers["S"])
+    names = list(species_helpers["names"])
+    sp_name_to_idx = species_helpers["species_name_to_index"]
+    print(f"      S={S} species nodes;  families kept={stats['kept']} "
+          f"dropped(<{args.min_species} sp)={stats['dropped_min_species']}  "
+          f"amalgamate={stats['parse_seconds']:.1f}s", flush=True)
+    if not families:
+        raise SystemExit("no usable families after filtering; aborting.")
+
+    print(f"[2/5] Building cross-family wave layout for {len(families)} "
+          f"families ...", flush=True)
+    t0 = time.time()
+    wave_layout, root_clade_ids = _build_wave_layout(families, device, dtype)
+    sp_helpers_gpu, _ = _sp_helpers_for_uniform(species_helpers, device, dtype)
+    unnorm_row_max = torch.log2(
+        species_helpers["Recipients_mat"]
+    ).max(dim=-1).values.to(device=device, dtype=dtype)
+    print(f"      wave layout built in {time.time() - t0:.1f}s", flush=True)
+
+    # 3. fraction-missing (decoupled E vs Pi leaf boundary), same as Williams.
+    fm_path = _fraction_missing_path(data_dir)
+    leaf_E = None
+    leaf_obs_log = None
+    fm_info = {"enabled": False, "fm_mode": args.fm_mode}
+    if args.fm_mode == "off":
+        print("[3/5] fraction-missing DISABLED (fm-mode=off)", flush=True)
+    elif not fm_path.exists():
+        print(f"[3/5] [warn] fraction_missing not found ({fm_path}); proceeding "
+              f"WITHOUT it (fm-mode={args.fm_mode}).", flush=True)
+        fm_info = {"enabled": False, "fm_mode": args.fm_mode,
+                   "note": "fraction_missing file not found"}
+    else:
+        fm, n_set, fm_skipped = _parse_fraction_missing(fm_path, sp_name_to_idx, S)
+        leaf_E_cpu, _ = _build_leaf_E(species_helpers, fm, S, dtype)
+        leaf_E = leaf_E_cpu.to(device=device, dtype=dtype)
+        n_missing = int(torch.isfinite(leaf_E).sum().item())
+        leaf_obs_log = leaf_E if args.fm_mode == "both" else None
+        fm_info = {"enabled": True, "fm_mode": args.fm_mode,
+                   "applied_to_E": True, "applied_to_Pi": args.fm_mode == "both",
+                   "rows_mapped": n_set, "leaves_with_fraction": n_missing,
+                   "skipped_rows": fm_skipped}
+        print(f"[3/5] fraction-missing ENABLED ({args.fm_mode}): {n_set} rows, "
+              f"{n_missing} leaves with fraction>0", flush=True)
+
+    # 4. Brownian prior + origination, same conventions as Williams.
+    parent_index = species_parent_index(species_helpers).to(device)
+    brownian_sigma = float(args.brownian_sigma) if args.prior == "brownian" else None
+    brownian_root_sigma = args.brownian_root_sigma
+    prior_info = {"prior": args.prior}
+    if args.prior == "brownian":
+        prior_info.update({"brownian_sigma": brownian_sigma,
+                           "brownian_root_sigma": brownian_root_sigma,
+                           "units": "log2"})
+
+    omega_init = None
+    origination_sigma = None
+    origination_root_sigma = args.origination_root_sigma
+    origination_info = {"origination": args.origination}
+    if args.origination == "optimize":
+        omega_init = torch.zeros(S, dtype=dtype, device=device)
+        if args.origination_sigma is not None:
+            origination_sigma = float(args.origination_sigma)
+        elif args.prior == "brownian":
+            origination_sigma = float(args.brownian_sigma)
+        if origination_sigma is not None:
+            origination_info.update({
+                "origination_sigma": origination_sigma,
+                "origination_root_sigma": origination_root_sigma,
+                "decouple_root": (not args.origination_couple_root),
+                "units": "log2"})
+
+    theta_init = math.log2(args.init_rate) * torch.ones(S, 3, dtype=dtype, device=device)
+
+    print(f"[4/5] Optimizing specieswise theta [S={S},3]  "
+          f"(optimizer={args.optimizer}, fm-mode={args.fm_mode}, "
+          f"origination={args.origination}, prior={args.prior}, "
+          f"steps={args.steps}) ...", flush=True)
+    t0 = time.time()
+    result = optimize_theta_wave(
+        wave_layout=wave_layout,
+        species_helpers=sp_helpers_gpu,
+        root_clade_ids=root_clade_ids,
+        unnorm_row_max=unnorm_row_max,
+        theta_init=theta_init,
+        steps=args.steps,
+        optimizer=args.optimizer,
+        specieswise=True,
+        pibar_mode=args.pibar_mode,
+        families=families,
+        device=device,
+        dtype=dtype,
+        leaf_E=leaf_E,
+        leaf_obs_log=leaf_obs_log,
+        verbose=True,
+        brownian_sigma=brownian_sigma,
+        brownian_root_sigma=brownian_root_sigma,
+        parent_index=parent_index,
+        origination=args.origination,
+        omega_init=omega_init,
+        origination_sigma=origination_sigma,
+        origination_root_sigma=origination_root_sigma,
+        origination_decouple_root=(not args.origination_couple_root),
+    )
+    elapsed = time.time() - t0
+
+    theta = result["theta"]
+    rates = result["rates"]
+    if args.origination == "optimize":
+        origination_prob = result["origination"]
+        omega = result["omega"]
+        origination_info.update({"origination": "optimize",
+                                 "omega_log2": omega.tolist(),
+                                 "origination_prob": origination_prob.tolist()})
+        if "origination_prior" in result:
+            origination_info["prior"] = result["origination_prior"]
+    else:
+        origination_prob = torch.full((S,), 1.0 / S, dtype=torch.float64)
+    nll = float(result["negative_log_likelihood"])
+    logL = float(result["log_likelihood"])
+    data_nll = float(result.get("data_negative_log_likelihood", nll))
+    data_logL = -data_nll
+
+    print(f"\n{'=' * 60}")
+    print(f"  DONE  root={args.root}  families={len(families)}  "
+          f"time={elapsed:.1f}s")
+    print(f"  NLL(log2)={nll:.4f}  data_logL(log2)={data_logL:.4f}  "
+          f"data_logL(ln)={data_logL * math.log(2.0):.4f}")
+    for col, lab in ((0, "D"), (1, "L"), (2, "T")):
+        c = rates[:, col]
+        print(f"  {lab}: min={float(c.min()):.6g} median={float(c.median()):.6g} "
+              f"max={float(c.max()):.6g}")
+    if args.origination == "optimize":
+        o = origination_prob
+        print(f"  O: min={float(o.min()):.6g} median={float(o.median()):.6g} "
+              f"max={float(o.max()):.6g} (sum={float(o.sum()):.6g})")
+    print(f"{'=' * 60}")
+
+    # 5. write rates (AleRax-comparable) + JSON sidecar.
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w") as fh:
+        if args.origination == "optimize":
+            fh.write("# node D L T O\n")
+            for s in range(S):
+                fh.write(f"{names[s]} {float(rates[s,0]):.10g} {float(rates[s,1]):.10g} "
+                         f"{float(rates[s,2]):.10g} {float(origination_prob[s]):.10g}\n")
+        else:
+            fh.write("# node D L T\n")
+            for s in range(S):
+                fh.write(f"{names[s]} {float(rates[s,0]):.10g} {float(rates[s,1]):.10g} "
+                         f"{float(rates[s,2]):.10g}\n")
+    print(f"  rates written -> {out_path}", flush=True)
+
+    sidecar = out_path.with_suffix(out_path.suffix + ".json")
+    payload = {
+        "command": " ".join(sys.argv), "dataset": "This_study/Undine_C60",
+        "root": args.root, "species_tree": str(tree_path), "S": S, "names": names,
+        "n_families_kept": len(families),
+        "n_families_dropped_min_species": stats["dropped_min_species"],
+        "min_species": args.min_species, "init_rate": args.init_rate,
+        "optimizer": args.optimizer, "pibar_mode": args.pibar_mode,
+        "steps": args.steps, "dtype": args.dtype, "fm_mode": args.fm_mode,
+        "fraction_missing": fm_info, "prior": prior_info, "origination": origination_info,
+        "negative_log_likelihood_log2": nll, "log_likelihood_log2": logL,
+        "negative_log_likelihood_ln": nll * math.log(2.0),
+        "data_log_likelihood_log2": data_logL,
+        "data_log_likelihood_ln": data_logL * math.log(2.0),
+        "data_negative_log_likelihood_log2": data_nll,
+        "theta_log2": theta.tolist(), "rates": rates.tolist(),
+        "elapsed_s": elapsed, "n_steps": len(result.get("history", [])),
+    }
+    with open(sidecar, "w") as fh:
+        json.dump(payload, fh, indent=2)
+    print(f"  sidecar written -> {sidecar}", flush=True)
+    return 0
+
+
+def _parse_args(argv=None):
+    p = argparse.ArgumentParser(
+        description="Branch-wise DTL rates + rooting for the This_study/Undine "
+                    "big tree from UFBoot samples (gpurec specieswise wave).")
+    p.add_argument("--root", required=True, help=f"one of {KNOWN_ROOTS}")
+    p.add_argument("--data-dir", default=DEFAULT_DATA_DIR)
+    p.add_argument("--min-species", type=int, default=1)
+    p.add_argument("--families", type=int, default=0,
+                   help="limit #families (0=all; for quick tests)")
+    p.add_argument("--steps", type=int, default=200)
+    p.add_argument("--optimizer", default="lbfgs", choices=["lbfgs", "adam", "sgd"])
+    p.add_argument("--pibar-mode", default="uniform", choices=["uniform", "dense", "topk"])
+    p.add_argument("--init-rate", type=float, default=0.1)
+    p.add_argument("--fm-mode", default="off", choices=["both", "e-only", "off"])
+    p.add_argument("--no-fraction-missing", action="store_true")
+    p.add_argument("--origination", default="uniform", choices=["uniform", "optimize"])
+    p.add_argument("--origination-sigma", type=float, default=None)
+    p.add_argument("--origination-root-sigma", type=float, default=5.0)
+    p.add_argument("--origination-couple-root", action="store_true",
+                   help="couple the root into the omega prior (default: decoupled)")
+    p.add_argument("--prior", default="none", choices=["none", "brownian"])
+    p.add_argument("--brownian-sigma", type=float, default=1.0)
+    p.add_argument("--brownian-root-sigma", type=float, default=5.0)
+    p.add_argument("--dtype", default="float64", choices=["float32", "float64"])
+    p.add_argument("--out", default=None)
+    p.add_argument("--preflight", action="store_true",
+                   help="amalgamate a sample + check species mapping, then exit (CPU)")
+    args = p.parse_args(argv)
+    if args.no_fraction_missing:
+        args.fm_mode = "off"
+    if args.out is None:
+        args.out = f"results/undine_{args.root}_branchwise.rates.txt"
+    return args
+
+
+def main(argv=None):
+    args = _parse_args(argv)
+    data_dir = Path(args.data_dir)
+    if args.preflight:
+        return _preflight(args, data_dir)
+    return _run(args, data_dir)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
