@@ -29,7 +29,7 @@ from run_williams_branchwise import (  # noqa: E402
     _load_species_helpers, _load_families, _build_wave_layout,
     _sp_helpers_for_uniform, _build_leaf_E, _parse_fraction_missing,
 )
-from clade_groups import group_index_for_species_helpers  # noqa: E402
+from clade_groups import branch_params_from_alerax  # noqa: E402
 
 _LN2 = math.log(2.0)
 DEFAULT_DATA_DIR = ("/work/SzollosiU/gergely-szollosi/williams_run/data/"
@@ -38,7 +38,7 @@ ROOTS = ["Alti", "AMD", "Asgard", "Cluster2", "DPANN", "Eury",
          "HaloThermoplas", "Kor", "TAC", "TackA"]
 
 
-def eval_root(root, data_dir, device, dtype, min_species, fm_mode):
+def eval_root(root, data_dir, device, dtype, min_species, fm_mode, use_alerax_o):
     from gpurec.core.extract_parameters import extract_parameters_uniform
     from gpurec.core.likelihood import E_fixed_point, compute_log_likelihood
     from gpurec.core.forward import Pi_wave_forward
@@ -51,14 +51,19 @@ def eval_root(root, data_dir, device, dtype, min_species, fm_mode):
     bw = data_dir / "reconciliation models" / "branch wise" / root
     cg_tree = bw / "species_trees" / "starting_species_tree.newick"
     cg_mp = bw / "model_parameters" / "model_parameters.txt"
-    gi, cat_rates, cat_orig, diag = group_index_for_species_helpers(
+    rate_branch, orig_branch, diag = branch_params_from_alerax(
         sp, str(cg_tree), str(cg_mp))
-    if diag["gpurec_unmapped"]:
-        raise SystemExit(f"{root}: unmapped nodes {diag['gpurec_unmapped'][:3]}")
-    # per-branch (D,L,T) = cat_rates[group_index[s]]
-    cat = torch.tensor(cat_rates, dtype=dtype)            # [G,3] linear rates D,L,T
-    rate_branch = cat[gi]                                  # [S,3]
-    theta = torch.log2(rate_branch.clamp_min(1e-10)).to(device=device, dtype=dtype)
+    if diag["unmapped"]:
+        raise SystemExit(f"{root}: unmapped nodes {diag['unmapped'][:3]}")
+    theta = torch.log2(rate_branch.clamp_min(1e-10)).to(device=device, dtype=dtype)  # [S,3]
+    # AleRax origination: a per-branch distribution (sum~1) -> log_pO = log2(O).
+    log_pO = None
+    if use_alerax_o:
+        if orig_branch is None:
+            raise SystemExit(f"{root}: model_parameters has no O column")
+        o = orig_branch.to(device=device, dtype=dtype).clamp_min(1e-12)
+        o = o / o.sum()                                   # renormalise to a distribution
+        log_pO = torch.log2(o)                            # [S]
 
     ale_paths = sorted(p for p in glob.glob(str(data_dir / "ccps" / "*.ale"))
                        if not Path(p).name.startswith("._"))
@@ -91,9 +96,9 @@ def eval_root(root, data_dir, device, dtype, min_species, fm_mode):
         log_pS=log_pS, log_pD=log_pD, log_pL=log_pL, transfer_mat=transfer_mat,
         max_transfer_mat=mt, device=device, dtype=dtype, pibar_mode="uniform",
         leaf_obs_log=leaf_obs_log)
-    nll_log2 = compute_log_likelihood(Pi_out["Pi"], E_out["E"], root_clade_ids, log_pO=None)
+    nll_log2 = compute_log_likelihood(Pi_out["Pi"], E_out["E"], root_clade_ids, log_pO=log_pO)
     total_logL_ln = float((-nll_log2).sum().item()) * _LN2
-    n_groups = int(gi.max().item()) + 1
+    n_groups = len({tuple(r.tolist()) for r in rate_branch})
     return total_logL_ln, F, n_groups
 
 
@@ -103,6 +108,9 @@ def main():
     ap.add_argument("--min-species", type=int, default=1)
     ap.add_argument("--fm-mode", default="e-only", choices=["off", "e-only", "both"])
     ap.add_argument("--roots", default=None, help="comma-sep subset (default all 10)")
+    ap.add_argument("--alerax-origination", action="store_true",
+                    help="use AleRax's per-branch O distribution (DTLO) as log_pO "
+                         "instead of uniform 1/S. The decisive origination test.")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
     if not torch.cuda.is_available():
@@ -114,12 +122,14 @@ def main():
 
     results = {}
     for r in roots:
-        ll, F, ng = eval_root(r, data_dir, device, dtype, args.min_species, args.fm_mode)
+        ll, F, ng = eval_root(r, data_dir, device, dtype, args.min_species,
+                              args.fm_mode, args.alerax_origination)
         results[r] = (ll, F, ng)
         print(f"[done] {r:16s} logL_ln={ll:14.1f}  F={F}  groups={ng}", flush=True)
 
     print("\n" + "=" * 70)
-    print("gpurec @ AleRax branch-wise (D,L,T) rates, UNIFORM O, fm=%s" % args.fm_mode)
+    o_desc = "AleRax O (DTLO)" if args.alerax_origination else "UNIFORM O"
+    print("gpurec @ AleRax branch-wise (D,L,T) rates, %s, fm=%s" % (o_desc, args.fm_mode))
     print("ranking by total data logL (ln), best first:")
     best = max(results.values())[0]
     for r in sorted(results, key=lambda x: -results[x][0]):

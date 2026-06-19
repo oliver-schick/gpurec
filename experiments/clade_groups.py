@@ -211,6 +211,41 @@ def species_node_leafsets(species_helpers, S: int):
     return [frozenset(s) for s in node_leaves]
 
 
+def branch_params_from_alerax(species_helpers, tree_path, model_params_path):
+    """Exact per-branch (D,L,T) and origination O for each gpurec node.
+
+    Maps every gpurec node's descendant leaf set to the AleRax node (labeled
+    tree) and reads that node's exact (D,L,T[,O]) from model_parameters.txt.
+    Returns (rate_branch[S,3] float tensor, orig_branch[S] float tensor or None,
+    diag). orig_branch is AleRax's per-branch origination (a distribution over
+    branches summing to ~1); None if model_parameters has no O column.
+    """
+    import torch
+
+    S = int(species_helpers["S"])
+    leafset_to_label = parse_labeled_newick(tree_path)
+    dlt, orig = load_model_parameters(model_params_path)
+    # label -> leafset; then gpurec node -> leafset -> label -> rates
+    label_to_leafset = {lbl: ls for ls, lbl in leafset_to_label.items()}
+    node_leafsets = species_node_leafsets(species_helpers, S)
+    # invert: leafset -> label
+    rate_branch = torch.zeros(S, 3, dtype=torch.float64)
+    orig_branch = torch.zeros(S, dtype=torch.float64) if orig else None
+    missing = []
+    for s in range(S):
+        lbl = leafset_to_label.get(node_leafsets[s])
+        if lbl is None or lbl not in dlt:
+            missing.append((s, sorted(node_leafsets[s])[:3]))
+            continue
+        rate_branch[s] = torch.tensor(dlt[lbl], dtype=torch.float64)
+        if orig_branch is not None:
+            orig_branch[s] = orig.get(lbl, 0.0)
+    diag = {"S": S, "n_model_params": len(dlt), "has_origination": bool(orig),
+            "unmapped": missing,
+            "orig_sum": float(orig_branch.sum()) if orig_branch is not None else None}
+    return rate_branch, orig_branch, diag
+
+
 def group_index_for_species_helpers(species_helpers, tree_path, model_params_path,
                                      round_sig: int = 6):
     """Build ``group_index[S]`` (long) + category rate table for a gpurec run.
