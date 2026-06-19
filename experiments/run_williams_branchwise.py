@@ -629,6 +629,22 @@ def _run(args, data_dir: Path):
     from gpurec.core.tree_prior import species_parent_index
 
     parent_index = species_parent_index(species_helpers).to(device)
+
+    # Vertical-evolution origination prior: per-branch DEPTH = #edges from the
+    # root (root=0), used to penalize below-root origination (--origination-depth-lambda).
+    origination_depth = None
+    if args.origination == "optimize" and args.origination_depth_lambda > 0:
+        _par = parent_index.tolist()
+        depth = [0] * S
+        for e in range(S):
+            d, cur, seen = 0, e, 0
+            while _par[cur] >= 0 and seen <= S:
+                d += 1; cur = _par[cur]; seen += 1
+            depth[e] = d
+        origination_depth = torch.tensor(depth, dtype=dtype, device=device)
+        print(f"      VERTICAL-EVOLUTION O prior: lambda={args.origination_depth_lambda} "
+              f"(depth range {min(depth)}..{max(depth)})", flush=True)
+
     prior_info = {"prior": args.prior}
     brownian_sigma = None
     brownian_root_sigma = args.brownian_root_sigma
@@ -726,6 +742,8 @@ def _run(args, data_dir: Path):
         origination_l2=origination_l2,
         group_index=group_index,
         omega_group_index=omega_group_index,
+        origination_depth=origination_depth,
+        origination_depth_lambda=args.origination_depth_lambda,
     )
     elapsed = time.time() - t0
 
@@ -904,6 +922,13 @@ def _parse_args(argv=None):
                         "regularizer because p^O=softmax(omega) is a probability "
                         "distribution (sum=1), not independent per-branch rates "
                         "(a Brownian prior is NOT appropriate).")
+    p.add_argument("--origination-depth-lambda", type=float, default=0.0,
+                   help="VERTICAL-EVOLUTION origination prior strength: penalize "
+                        "lambda * E_{p^O}[depth] (depth = edges below root), pulling "
+                        "origination to the root and penalizing the below-root "
+                        "loss-saving concentration the small-genome artefact "
+                        "exploits. Only with --origination optimize (free omega). "
+                        "0 = off. Selected by evidence (empirical Bayes).")
     p.add_argument("--family-batch-size", type=int, default=0,
                    help="Process families in mini-batches of this size for the "
                         "forward/backward (gradient accumulated across batches), "

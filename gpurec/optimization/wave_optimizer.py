@@ -96,6 +96,8 @@ def optimize_theta_wave(
     origination_l2: float = 0.0,
     group_index: torch.Tensor | None = None,
     omega_group_index: torch.Tensor | None = None,
+    origination_depth: torch.Tensor | None = None,
+    origination_depth_lambda: float = 0.0,
 ):
     """Optimize theta using wave forward/backward + implicit gradient.
 
@@ -364,6 +366,27 @@ def optimize_theta_wave(
     _orig_l2 = float(origination_l2) if (_opt_origination and origination_l2) else 0.0
     _use_orig_l2 = _orig_l2 > 0.0
 
+    # VERTICAL-EVOLUTION origination prior: penalize the EXPECTED origination
+    # DEPTH, E_{p^O}[depth] = sum_e p^O_e * depth_e, where depth_e is the number
+    # of edges from the root to branch e (root = 0). This pulls origination mass
+    # toward the root (vertical inheritance) and penalizes the below-root
+    # loss-saving concentration that the small-genome-attraction artefact
+    # exploits. Penalty lambda * E_{p^O}[depth]; gradient (base-2 softmax)
+    # lambda * ln2 * p^O_e * (depth_e - E_{p^O}[depth]). Only for free per-branch
+    # omega (not grouped). lambda selected by evidence (empirical Bayes).
+    _depth = None
+    _depth_lambda = float(origination_depth_lambda) if _opt_origination else 0.0
+    _use_depth = (origination_depth is not None) and _depth_lambda > 0.0
+    if _use_depth:
+        if _use_omega_groups:
+            raise ValueError(
+                "origination_depth prior is for FREE per-branch omega; not "
+                "compatible with omega_group_index (grouped origination).")
+        _depth = origination_depth.to(device=device, dtype=dtype).reshape(-1)
+        if _depth.numel() != _S_branches:
+            raise ValueError(
+                f"origination_depth must have S={_S_branches} entries, got {_depth.numel()}")
+
     _brownian_prior = None
     _prior_parent_index = None
     _prior_sigma = None
@@ -409,6 +432,19 @@ def optimize_theta_wave(
             return nll, grad_omega
         pen = _orig_l2 * float((omega_d * omega_d).sum().item())
         return nll + pen, grad_omega + (2.0 * _orig_l2) * omega_d
+
+    def _apply_origination_depth(omega_d, nll, grad_omega):
+        """Vertical-evolution prior: penalize E_{p^O}[depth] (pull origination to
+        the root). pen = lambda * sum_e p^O_e depth_e; grad (base-2 softmax) =
+        lambda * ln2 * p^O_e (depth_e - E_{p^O}[depth])."""
+        if not _use_depth or omega_d is None or grad_omega is None:
+            return nll, grad_omega
+        log_pO = _origination_log_pO(omega_d)          # omega - logsumexp2(omega)
+        p = torch.exp2(log_pO)                         # [S] p^O
+        Ed = (p * _depth).sum()
+        pen = _depth_lambda * float(Ed.item())
+        grad = (_depth_lambda * math.log(2.0)) * p * (_depth - Ed)
+        return nll + pen, grad_omega + grad
 
     # Precompute ancestors_T for uniform mode
     _ancestors_T = None
@@ -777,6 +813,7 @@ def optimize_theta_wave(
             nll, grad_theta = _apply_prior(theta_d, nll, grad_theta)
             # L2 ridge on the (possibly grouped) origination logits.
             nll, grad_omega = _apply_origination_prior(omega_param, nll, grad_omega)
+            nll, grad_omega = _apply_origination_depth(omega_param, nll, grad_omega)
             # Reduce the per-branch [S,3] gradient to per-group [G,3] (chain rule
             # of the expand map); no-op when ungrouped.
             grad_param = _reduce_grad(grad_theta)
@@ -923,6 +960,8 @@ def optimize_theta_wave(
                     origination_l2=origination_l2,
                     group_index=group_index,
                     omega_group_index=omega_group_index,
+                    origination_depth=origination_depth,
+                    origination_depth_lambda=origination_depth_lambda,
                 )
                 # Merge histories: float32 phase first, then float64 phase
                 result64["history"] = history + result64["history"]
