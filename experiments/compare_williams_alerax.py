@@ -43,6 +43,27 @@ def parse_rates(path, skip_header):
     return out
 
 
+def parse_origination(path, skip_header):
+    """Return {node_name: O} from the 4th value column ('name D L T O'), or {} if
+    the file has no 5th field. gpurec writes 'O' = softmax p^O_e (sum=1 over all
+    branches); AleRax model_parameters.txt has its own O scale -- so compare the
+    PATTERN (Pearson/Spearman on log10) and report the median ratio for scale."""
+    out = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) < 5:
+                continue
+            try:
+                out[parts[0]] = float(parts[4])
+            except ValueError:
+                continue
+    return out
+
+
 def leaf_names_from_newick(path):
     """Leaf labels = tokens immediately preceding ':' or ',' or ')' that are not
     after ')'. Simple + robust for these trees: a leaf is a name not preceded by ')'."""
@@ -128,6 +149,37 @@ def main():
         ratios = sorted(10 ** (x - y) for x, y in zip(gx, ax))
         med = ratios[len(ratios) // 2]
         emit(f"  {name:<4} {r:>13.4f} {rho:>10.4f} {rmse:>12.4f} {med:>14.3g}")
+
+    # Origination (O) column comparison, only if BOTH files carry a 5th field.
+    go = parse_origination(args.gpurec, skip_header=True)
+    ao = parse_origination(args.alerax, skip_header=False)
+    common_o = sorted(n for n in leaves if n in go and n in ao)
+    if common_o:
+        gv = [go[n] for n in common_o]
+        av = [ao[n] for n in common_o]
+        gl = [log10c(x) for x in gv]
+        al = [log10c(x) for x in av]
+        r = pearson(gl, al)
+        rho = spearman(gl, al)
+        rmse = math.sqrt(sum((x - y) ** 2 for x, y in zip(gl, al)) / len(gl))
+        ratios = sorted(10 ** (x - y) for x, y in zip(gl, al))
+        med = ratios[len(ratios) // 2]
+        emit("")
+        emit("  ORIGINATION (O) — leaf branches "
+             f"(n={len(common_o)}; gpurec O=softmax p^O sum=1, AleRax O own scale):")
+        emit(f"  {'axis':<4} {'Pearson(log)':>13} {'Spearman':>10} {'RMSE(log10)':>12} {'med ratio g/a':>14}")
+        emit(f"  {'O':<4} {r:>13.4f} {rho:>10.4f} {rmse:>12.4f} {med:>14.3g}")
+
+        def _stats(v):
+            s = sorted(v)
+            n = len(s)
+            return s[0], s[n // 2], s[-1]
+        glo, gmd, ghi = _stats(gv)
+        alo, amd, ahi = _stats(av)
+        emit(f"    gpurec O: min={glo:.4g} median={gmd:.4g} max={ghi:.4g}  "
+             f"(spread max/min={ghi / max(glo, 1e-30):.2f}x)")
+        emit(f"    AleRax O: min={alo:.4g} median={amd:.4g} max={ahi:.4g}  "
+             f"(spread max/min={ahi / max(alo, 1e-30):.2f}x)")
 
     # a few worst-disagreeing leaves on L (the hard axis)
     emit("")
