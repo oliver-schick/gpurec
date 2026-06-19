@@ -29,6 +29,11 @@ class NewickParser {
 public:
   explicit NewickParser(const std::string &text);
   TreeNode *parse();
+  // Parse ONE tree from the current position, consume a trailing ';' if present,
+  // and leave pos_ at the start of the next tree (no trailing-character check).
+  TreeNode *parse_one();
+  // True if only whitespace remains (no further tree to parse).
+  bool at_end();
 
 private:
   TreeNode *parse_subtree();
@@ -44,6 +49,14 @@ private:
 
 // Parse a Newick file into a TreeNode structure (owned by unique_ptr)
 std::unique_ptr<TreeNode> parse_newick_file(const std::string &path);
+
+// Parse ALL Newick trees from a file (a multi-tree sample, e.g. a UFBoot
+// bootstrap distribution with one ';'-terminated tree per line). Returns one
+// TreeNode per tree. Honors the GPUREC_MAX_TREES_PER_FAMILY env var (cap on the
+// number of trees read; 0/unset = read all). A single-tree file yields one tree,
+// so this is a drop-in superset of parse_newick_file.
+std::vector<std::unique_ptr<TreeNode>>
+parse_newick_file_all(const std::string &path);
 
 // Post-order traversal collection
 void collect_nodes_postorder(TreeNode *node, std::vector<TreeNode *> &order);
