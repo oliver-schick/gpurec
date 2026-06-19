@@ -38,7 +38,7 @@ ROOTS = ["Alti", "AMD", "Asgard", "Cluster2", "DPANN", "Eury",
          "HaloThermoplas", "Kor", "TAC", "TackA"]
 
 
-def eval_root(root, data_dir, device, dtype, min_species, fm_mode, use_alerax_o):
+def eval_root(root, data_dir, device, dtype, min_species, fm_mode, o_mode, root_frac):
     from gpurec.core.extract_parameters import extract_parameters_uniform
     from gpurec.core.likelihood import E_fixed_point, compute_log_likelihood
     from gpurec.core.forward import Pi_wave_forward
@@ -56,14 +56,29 @@ def eval_root(root, data_dir, device, dtype, min_species, fm_mode, use_alerax_o)
     if diag["unmapped"]:
         raise SystemExit(f"{root}: unmapped nodes {diag['unmapped'][:3]}")
     theta = torch.log2(rate_branch.clamp_min(1e-10)).to(device=device, dtype=dtype)  # [S,3]
-    # AleRax origination: a per-branch distribution (sum~1) -> log_pO = log2(O).
+    # ORIGINATION p^O_e distribution -> log_pO = log2(p^O).
+    #   'uniform' : log_pO=None (p^O=1/S)
+    #   'alerax'  : AleRax's fitted per-branch O (the structured DTLO)
+    #   'root'    : VERTICAL-EVOLUTION prior -- root_frac on the SINGLE root node
+    #               (parent<0), (1-root_frac) spread uniformly over all branches.
     log_pO = None
-    if use_alerax_o:
+    if o_mode == "alerax":
         if orig_branch is None:
             raise SystemExit(f"{root}: model_parameters has no O column")
         o = orig_branch.to(device=device, dtype=dtype).clamp_min(1e-12)
-        o = o / o.sum()                                   # renormalise to a distribution
+        o = o / o.sum()
         log_pO = torch.log2(o)                            # [S]
+    elif o_mode == "root":
+        from gpurec.core.tree_prior import species_parent_index
+        par = species_parent_index(sp).tolist()
+        root_nodes = [i for i in range(S) if par[i] < 0]
+        if len(root_nodes) != 1:
+            raise SystemExit(f"{root}: expected exactly 1 root branch, got {root_nodes}")
+        rn = root_nodes[0]
+        o = torch.full((S,), (1.0 - root_frac) / S, dtype=dtype, device=device)
+        o[rn] += root_frac                                # spike on the one root branch
+        o = o / o.sum()
+        log_pO = torch.log2(o.clamp_min(1e-300))
 
     ale_paths = sorted(p for p in glob.glob(str(data_dir / "ccps" / "*.ale"))
                        if not Path(p).name.startswith("._"))
@@ -108,9 +123,14 @@ def main():
     ap.add_argument("--min-species", type=int, default=1)
     ap.add_argument("--fm-mode", default="e-only", choices=["off", "e-only", "both"])
     ap.add_argument("--roots", default=None, help="comma-sep subset (default all 10)")
-    ap.add_argument("--alerax-origination", action="store_true",
-                    help="use AleRax's per-branch O distribution (DTLO) as log_pO "
-                         "instead of uniform 1/S. The decisive origination test.")
+    ap.add_argument("--origination", default="uniform",
+                    choices=["uniform", "alerax", "root"],
+                    help="p^O: uniform 1/S | AleRax's fitted DTLO | 'root' "
+                         "(VERTICAL-EVOLUTION prior: --root-frac on the single root "
+                         "branch, rest uniform).")
+    ap.add_argument("--root-frac", type=float, default=1.0,
+                    help="for --origination root: fraction of origination mass on "
+                         "the root branch (1.0=pure root; e.g. 0.5=root+uniform).")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
     if not torch.cuda.is_available():
@@ -123,12 +143,13 @@ def main():
     results = {}
     for r in roots:
         ll, F, ng = eval_root(r, data_dir, device, dtype, args.min_species,
-                              args.fm_mode, args.alerax_origination)
+                              args.fm_mode, args.origination, args.root_frac)
         results[r] = (ll, F, ng)
         print(f"[done] {r:16s} logL_ln={ll:14.1f}  F={F}  groups={ng}", flush=True)
 
     print("\n" + "=" * 70)
-    o_desc = "AleRax O (DTLO)" if args.alerax_origination else "UNIFORM O"
+    o_desc = {"uniform": "UNIFORM O", "alerax": "AleRax O (DTLO)",
+              "root": f"ROOT-origination frac={args.root_frac}"}[args.origination]
     print("gpurec @ AleRax branch-wise (D,L,T) rates, %s, fm=%s" % (o_desc, args.fm_mode))
     print("ranking by total data logL (ln), best first:")
     best = max(results.values())[0]
