@@ -67,10 +67,15 @@ def _tree_path(data_dir: Path, root: str) -> Path:
 
 
 def _ufboot_paths(data_dir: Path):
-    return sorted(
-        p for p in glob.glob(str(data_dir / "3_UFBOOTs" / "*.ufboot"))
-        if not Path(p).name.startswith("._")
-    )
+    # The AleRax-ready UFBoot samples live under 3_UFBOOTs/ufboot_for_alerax/;
+    # fall back to a flat 3_UFBOOTs/ layout if that subdir is absent.
+    out = []
+    for pat in ("3_UFBOOTs/ufboot_for_alerax/*.ufboot", "3_UFBOOTs/*.ufboot"):
+        out += [p for p in glob.glob(str(data_dir / pat))
+                if not Path(p).name.startswith("._")]
+        if out:
+            break
+    return sorted(out)
 
 
 def _fraction_missing_path(data_dir: Path) -> Path:
