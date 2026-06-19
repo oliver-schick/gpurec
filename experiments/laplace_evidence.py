@@ -290,15 +290,18 @@ def main():
             if (j + 1) % 20 == 0:
                 print(f"[hess]   col {j + 1}/{k_eff}", flush=True)
         H_U = 0.5 * (H_U + H_U.t())
-        A = H_U + tau * torch.eye(k_eff, dtype=dtype, device=device)
-        evA = torch.linalg.eigvalsh(0.5 * (A + A.t()))
-        n_neg = int((evA <= 0).sum())
-        logdet = float(torch.log(evA.clamp(min=tau * 1e-6)).sum())
-        evH = torch.linalg.eigvalsh(H_U).clamp(min=0)
-        p_eff = float((evH / (evH + tau)).sum())
-        top5 = evH.flip(0)[:5].tolist()
-        bot5 = evH[:5].tolist()
-        null_dim = int((evH < 1e-8 * evH.max().clamp(min=1)).sum())
+        evH_raw = torch.linalg.eigvalsh(H_U)          # eigenvalues of the data Hessian H
+        # Robust to indefinite/under-converged optima: count only the POSITIVE
+        # (well-determined) curvature; flat/negative directions are prior-dominated
+        # (contribute log(tau) to logdet, 0 to p_eff). For a true minimum (H PSD)
+        # this is the exact Laplace.
+        n_neg = int((evH_raw < -1e-6).sum())
+        lam_pos = evH_raw.clamp(min=0.0)
+        logdet = float(torch.log(lam_pos + tau).sum())
+        p_eff = float((lam_pos / (lam_pos + tau)).sum())
+        top5 = evH_raw.flip(0)[:5].tolist()
+        bot5 = evH_raw[:5].tolist()
+        null_dim = int((evH_raw.abs() < 1e-8 * evH_raw.abs().max().clamp(min=1)).sum())
         hess_method = "full_fd"
         n_hv = k_eff
     else:
@@ -314,6 +317,7 @@ def main():
         gen.manual_seed(20260619)
         logdet_acc = 0.0
         peff_acc = 0.0
+        nneg_acc = 0.0
         ritz_top = []
         for _p in range(n_probe):
             v = (torch.randint(0, 2, (k_eff,), generator=gen).to(dtype) * 2 - 1).to(device)
@@ -345,15 +349,17 @@ def main():
             for i in range(len(betas)):
                 T[i, i + 1] = betas[i]
                 T[i + 1, i] = betas[i]
-            ev, evec = torch.linalg.eigh(T)
-            wt = evec[0, :] ** 2
-            evc = ev.clamp(min=tau * 1e-6)
-            logdet_acc += k_eff * float((wt * torch.log(evc)).sum())
-            peff_acc += k_eff * float((wt * ((ev - tau) / evc)).sum())
-            ritz_top.append(float(ev.max()))
+            ev, evec = torch.linalg.eigh(T)              # Ritz values of A=H+tauI
+            wt = evec[0, :] ** 2                          # SLQ quadrature weights
+            lam_H = ev - tau                             # -> Ritz eigenvalues of H
+            lam_pos = lam_H.clamp(min=0.0)              # robust positive part
+            logdet_acc += k_eff * float((wt * torch.log(lam_pos + tau)).sum())
+            peff_acc += k_eff * float((wt * (lam_pos / (lam_pos + tau))).sum())
+            nneg_acc += k_eff * float((wt * (lam_H < -1e-6).to(dtype)).sum())
+            ritz_top.append(float(lam_H.max()))
         logdet = logdet_acc / n_probe
         p_eff = peff_acc / n_probe
-        n_neg = 0
+        n_neg = int(round(nneg_acc / n_probe))           # SLQ-estimated #neg-curv dirs
         top5 = sorted(ritz_top, reverse=True)[:5]
         bot5 = []
         null_dim = None
