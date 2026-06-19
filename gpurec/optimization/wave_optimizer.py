@@ -93,6 +93,7 @@ def optimize_theta_wave(
     origination_root_sigma: float = 5.0,
     origination_mu: float = 0.0,
     origination_decouple_root: bool = True,
+    origination_l2: float = 0.0,
 ):
     """Optimize theta using wave forward/backward + implicit gradient.
 
@@ -184,31 +185,20 @@ def optimize_theta_wave(
     omega_init : Tensor [S] | None
         Initial origination log2-weights (only used when origination='optimize').
         None (default) -> omega = 0 (uniform p^O_e = 1/S).
-    origination_sigma : float | None
-        Std (log2 units) of a time-uniform TKP Brownian prior coupling adjacent
-        branches' origination log2-weights ``omega`` along the species tree
-        (the same prior used for the DTL rates, applied to omega [S,1]). None
-        (default) leaves origination FREE/unregularized. Small sigma -> omega
-        smoothed toward a constant -> p^O_e -> uniform (1/S), matching AleRax's
-        near-constant origination column. Only used when origination='optimize'.
-        The Brownian increment penalty is shift-invariant, so it respects the
-        softmax gauge; the root anchor pins the otherwise-free global shift.
-    origination_root_sigma : float
-        Root-anchor std (log2 units) for the omega prior. Default 5.0. IGNORED
-        when ``origination_decouple_root`` is True (the root is left free).
-    origination_mu : float
-        Root-anchor centre (log2 units) for the omega prior. Default 0.0 (the
-        anchor value is a gauge choice; softmax makes any global shift a no-op).
-    origination_decouple_root : bool
-        If True (default), the ROOT is decoupled from the omega prior: the
-        root's incident edges are cut (its children are NOT smoothed toward the
-        root) and the root anchor is dropped, so the root origination weight is
-        FREE — set by the data, not pulled toward the rest of the tree.
-        Origination at the root (genes present in the LCA / ancestral genome) is
-        qualitatively different from lineage-specific gene birth, so it should
-        not be coupled to the per-lineage origination rates. Non-root branches
-        are still smoothed within their clades. If False, the root participates
-        in the prior like any node (coupled to its children + anchored).
+    origination_l2 : float
+        L2 / ridge regularization strength on the origination logits ``omega``:
+        adds ``lambda * sum_e omega_e^2`` to the loss (grad ``2*lambda*omega``),
+        shrinking omega toward 0 i.e. p^O toward UNIFORM (1/S). This is the
+        APPROPRIATE regularizer for origination, since p^O_e = softmax(omega) is
+        a probability DISTRIBUTION over branches (sum_e p^O_e = 1), not a set of
+        independent per-branch rates. 0.0 (default) -> FREE omega (no reg). Only
+        used when origination='optimize'.
+    origination_sigma, origination_root_sigma, origination_mu,
+    origination_decouple_root :
+        DEPRECATED / no-ops. These configured a tree-structured Brownian prior on
+        omega, which is inappropriate for a softmax probability distribution
+        (it smooths adjacent log-weights as if they were independent rates). Use
+        ``origination_l2`` instead. Kept only for call-signature stability.
 
     Returns
     -------
@@ -266,32 +256,32 @@ def optimize_theta_wave(
                   "skipping prior]", flush=True)
         _use_prior = False
 
-    # Optional Brownian prior on the per-branch origination log2-weights omega.
-    # Regularizes the FREE per-branch origination (otherwise as unidentifiable
-    # as free per-branch loss) by coupling adjacent branches along the species
-    # tree -- the SAME prior, applied to omega reshaped [S,1].
-    _use_orig_prior = _opt_origination and (origination_sigma is not None)
+    # Origination regularization: L2 (ridge) on the softmax logits.
+    # The origination weights p^O_e = softmax(omega) form a PROBABILITY
+    # DISTRIBUTION over branches (sum_e p^O_e = 1), so a tree-structured Brownian
+    # prior on omega is NOT appropriate (it would smooth adjacent log-weights as
+    # if they were independent per-branch rates). The right regularizer is L2 /
+    # ridge on the logits: lambda * sum_e omega_e^2, which shrinks omega toward 0,
+    # i.e. p^O toward UNIFORM (1/S). origination_l2 = 0 -> FREE omega (no reg).
+    # (The legacy origination_sigma/_root_sigma/_mu/_decouple_root args are
+    # accepted for signature stability but no longer used.)
+    _orig_l2 = float(origination_l2) if (_opt_origination and origination_l2) else 0.0
+    _use_orig_l2 = _orig_l2 > 0.0
 
     _brownian_prior = None
     _prior_parent_index = None
     _prior_sigma = None
     _prior_root_sigma = None
     _prior_mu = None
-    _orig_sigma = None
-    _orig_root_sigma = None
-    _orig_mu = None
-    _orig_parent_index = None
-    if _use_prior or _use_orig_prior:
+    if _use_prior:
         from gpurec.core.tree_prior import (
             brownian_log_prior_and_grad as _brownian_prior,
             species_parent_index as _species_parent_index,
         )
-        # Shared species-tree parent index (both priors live on the same tree).
         if parent_index is None:
             _prior_parent_index = _species_parent_index(species_helpers).to(device)
         else:
             _prior_parent_index = parent_index.to(device=device, dtype=torch.long)
-    if _use_prior:
         _prior_sigma = brownian_sigma
         _prior_root_sigma = brownian_root_sigma
         # Default root-anchor centre = theta_init root row (== log2(init_rate)
@@ -304,28 +294,9 @@ def optimize_theta_wave(
             _prior_mu = _ti[int(_root_ids[0].item())].clone()
         else:
             _prior_mu = brownian_mu
-    if _use_orig_prior:
-        _orig_sigma = float(origination_sigma)
-        _orig_mu = float(origination_mu)
-        if origination_decouple_root:
-            # Decouple the root: cut its incident edges so the root and each of
-            # its child-subtrees are not smoothed across the root, and drop the
-            # root anchor. The root origination weight is then FREE (data-driven),
-            # not pulled toward the per-lineage origination of the rest of the
-            # tree. Non-root branches stay smoothed within their clades.
-            _opi = _prior_parent_index.clone()
-            _arange_S = torch.arange(_opi.shape[0], device=device)
-            _is_root = (_opi < 0) | (_opi == _arange_S)
-            _root_id = int(torch.nonzero(_is_root, as_tuple=False).flatten()[0].item())
-            _opi[_opi == _root_id] = -1          # cut root -> child edges
-            _orig_parent_index = _opi
-            _orig_root_sigma = float('inf')       # no anchor (root left free)
-        else:
-            _orig_parent_index = _prior_parent_index
-            _orig_root_sigma = float(origination_root_sigma)
 
     def _apply_prior(theta_d, nll, grad_theta):
-        """Add the Brownian penalty to nll and its gradient to grad_theta."""
+        """Add the Brownian rate penalty to nll and its gradient to grad_theta."""
         if not _use_prior:
             return nll, grad_theta
         penalty, p_grad = _brownian_prior(
@@ -334,14 +305,14 @@ def optimize_theta_wave(
         return nll + float(penalty.item()), grad_theta + p_grad
 
     def _apply_origination_prior(omega_d, nll, grad_omega):
-        """Add the Brownian penalty on omega [S,1] to nll and grad_omega [S]."""
-        if not _use_orig_prior or omega_d is None or grad_omega is None:
+        """L2 (ridge) penalty on the origination logits: lambda * sum(omega^2).
+
+        Shrinks p^O toward uniform; lambda=0 leaves omega FREE. (Brownian is
+        inappropriate -- omega is a softmax distribution, not per-branch rates.)"""
+        if not _use_orig_l2 or omega_d is None or grad_omega is None:
             return nll, grad_omega
-        penalty, p_grad = _brownian_prior(
-            omega_d.reshape(-1, 1), _orig_parent_index,
-            _orig_sigma, _orig_root_sigma, _orig_mu,
-        )
-        return nll + float(penalty.item()), grad_omega + p_grad.reshape(-1)
+        pen = _orig_l2 * float((omega_d * omega_d).sum().item())
+        return nll + pen, grad_omega + (2.0 * _orig_l2) * omega_d
 
     # Precompute ancestors_T for uniform mode
     _ancestors_T = None
@@ -831,6 +802,7 @@ def optimize_theta_wave(
                     origination_root_sigma=origination_root_sigma,
                     origination_mu=origination_mu,
                     origination_decouple_root=origination_decouple_root,
+                    origination_l2=origination_l2,
                 )
                 # Merge histories: float32 phase first, then float64 phase
                 result64["history"] = history + result64["history"]
@@ -863,12 +835,9 @@ def optimize_theta_wave(
                 _origination_log_pO(omega_final)
             ).detach().cpu()
             result_dict["origination_strategy"] = origination
-            if _use_orig_prior:
+            if _use_orig_l2:
                 result_dict["origination_prior"] = {
-                    "sigma": _orig_sigma,
-                    "root_sigma": _orig_root_sigma,
-                    "mu": _orig_mu,
-                    "decouple_root": bool(origination_decouple_root),
+                    "type": "l2", "lambda": _orig_l2,
                 }
         return result_dict
 

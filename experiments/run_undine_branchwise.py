@@ -223,21 +223,16 @@ def _run(args, data_dir: Path):
                            "units": "log2"})
 
     omega_init = None
-    origination_sigma = None
-    origination_root_sigma = args.origination_root_sigma
+    origination_l2 = 0.0
     origination_info = {"origination": args.origination}
     if args.origination == "optimize":
         omega_init = torch.zeros(S, dtype=dtype, device=device)
-        if args.origination_sigma is not None:
-            origination_sigma = float(args.origination_sigma)
-        elif args.prior == "brownian":
-            origination_sigma = float(args.brownian_sigma)
-        if origination_sigma is not None:
-            origination_info.update({
-                "origination_sigma": origination_sigma,
-                "origination_root_sigma": origination_root_sigma,
-                "decouple_root": (not args.origination_couple_root),
-                "units": "log2"})
+        # p^O = softmax(omega) is a probability distribution -> L2 ridge on the
+        # logits (shrink toward uniform), NOT a Brownian prior. 0 = free.
+        origination_l2 = float(args.origination_l2)
+        origination_info.update({
+            "regularization": ("l2" if origination_l2 > 0 else "free"),
+            "origination_l2": origination_l2})
 
     theta_init = math.log2(args.init_rate) * torch.ones(S, 3, dtype=dtype, device=device)
 
@@ -257,6 +252,7 @@ def _run(args, data_dir: Path):
         specieswise=True,
         pibar_mode=args.pibar_mode,
         families=families,
+        family_batch_size=args.family_batch_size,
         device=device,
         dtype=dtype,
         leaf_E=leaf_E,
@@ -267,9 +263,7 @@ def _run(args, data_dir: Path):
         parent_index=parent_index,
         origination=args.origination,
         omega_init=omega_init,
-        origination_sigma=origination_sigma,
-        origination_root_sigma=origination_root_sigma,
-        origination_decouple_root=(not args.origination_couple_root),
+        origination_l2=origination_l2,
     )
     elapsed = time.time() - t0
 
@@ -364,10 +358,13 @@ def _parse_args(argv=None):
     p.add_argument("--fm-mode", default="off", choices=["both", "e-only", "off"])
     p.add_argument("--no-fraction-missing", action="store_true")
     p.add_argument("--origination", default="uniform", choices=["uniform", "optimize"])
-    p.add_argument("--origination-sigma", type=float, default=None)
-    p.add_argument("--origination-root-sigma", type=float, default=5.0)
-    p.add_argument("--origination-couple-root", action="store_true",
-                   help="couple the root into the omega prior (default: decoupled)")
+    p.add_argument("--origination-l2", type=float, default=0.0,
+                   help="L2/ridge on origination logits (lambda*sum(omega^2), "
+                        "shrink p^O toward uniform). 0=free. p^O is a softmax "
+                        "distribution, so L2 is correct (not a Brownian prior).")
+    p.add_argument("--family-batch-size", type=int, default=0,
+                   help="mini-batch families for forward/backward to bound GPU "
+                        "memory (0=all at once). Use a few hundred for the big tree.")
     p.add_argument("--prior", default="none", choices=["none", "brownian"])
     p.add_argument("--brownian-sigma", type=float, default=1.0)
     p.add_argument("--brownian-root-sigma", type=float, default=5.0)

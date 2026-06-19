@@ -621,24 +621,17 @@ def _run(args, data_dir: Path):
     #   p^O_e = softmax(omega).
     omega_init = None
     origination_info = {"origination": args.origination}
-    origination_sigma = None
-    origination_root_sigma = args.origination_root_sigma
+    origination_l2 = 0.0
     if args.origination == "optimize":
         omega_init = torch.zeros(S, dtype=dtype, device=device)  # uniform init
-        # Prior on omega: explicit --origination-sigma wins; else, if a Brownian
-        # rate prior is on, regularize origination at the SAME stiffness by
-        # default (free per-branch origination is otherwise unidentifiable).
-        if args.origination_sigma is not None:
-            origination_sigma = float(args.origination_sigma)
-        elif args.prior == "brownian":
-            origination_sigma = float(args.brownian_sigma)
-        if origination_sigma is not None:
-            origination_info.update({
-                "origination_sigma": origination_sigma,
-                "origination_root_sigma": origination_root_sigma,
-                "decouple_root": (not args.origination_couple_root),
-                "units": "log2",
-            })
+        # p^O_e = softmax(omega) is a probability distribution (sum=1), so the
+        # appropriate regularizer is L2/ridge on the logits (shrink toward
+        # uniform), NOT a tree-structured Brownian prior. 0 -> free omega.
+        origination_l2 = float(args.origination_l2)
+        origination_info.update({
+            "regularization": ("l2" if origination_l2 > 0 else "free"),
+            "origination_l2": origination_l2,
+        })
 
     print(f"[5/5] Optimizing specieswise theta [S={S},3]  "
           f"(init-rate={args.init_rate}, optimizer={args.optimizer}, "
@@ -651,13 +644,11 @@ def _run(args, data_dir: Path):
     else:
         print(f"      prior=none (free per-branch rates)", flush=True)
     if args.origination == "optimize":
-        if origination_sigma is not None:
-            _root_mode = ("root COUPLED+anchored" if args.origination_couple_root
-                          else "root DECOUPLED (free, edges cut)")
-            print(f"      origination=optimize  WITH Brownian prior on omega: "
-                  f"sigma={origination_sigma} (log2)  {_root_mode}", flush=True)
+        if origination_l2 > 0:
+            print(f"      origination=optimize  free omega + L2 ridge "
+                  f"(lambda={origination_l2})", flush=True)
         else:
-            print(f"      origination=optimize  (FREE per-branch omega, no prior)",
+            print(f"      origination=optimize  (FREE per-branch omega, no reg)",
                   flush=True)
     if theta_bounds is not None:
         print(f"      rate-bounds (AleRax-style box) = [{bounds_info['rate_bounds'][0]:g}, "
@@ -676,6 +667,7 @@ def _run(args, data_dir: Path):
         specieswise=True,
         pibar_mode=args.pibar_mode,
         families=families,
+        family_batch_size=args.family_batch_size,
         device=device,
         dtype=dtype,
         leaf_E=leaf_E,
@@ -687,9 +679,7 @@ def _run(args, data_dir: Path):
         theta_bounds=theta_bounds,
         origination=args.origination,
         omega_init=omega_init,
-        origination_sigma=origination_sigma,
-        origination_root_sigma=origination_root_sigma,
-        origination_decouple_root=(not args.origination_couple_root),
+        origination_l2=origination_l2,
     )
     elapsed = time.time() - t0
 
@@ -859,27 +849,20 @@ def _parse_args(argv=None):
     p.add_argument("--brownian-root-sigma", type=float, default=5.0,
                    help="Root-anchor std (log2 units) for prior propriety. "
                         "Default: 5.0")
-    p.add_argument("--origination-sigma", type=float, default=None,
-                   help="Std (log2 units) of a Brownian prior on the per-branch "
-                        "origination log2-weights omega (same TKP prior as the "
-                        "rates, coupling adjacent branches). Only used with "
-                        "--origination optimize. Default: None -> if --prior "
-                        "brownian, falls back to --brownian-sigma (regularize "
-                        "origination at the same stiffness); otherwise origination "
-                        "is left free. Smaller -> omega smoothed toward uniform "
-                        "p^O_e (matching AleRax's near-constant origination).")
-    p.add_argument("--origination-root-sigma", type=float, default=5.0,
-                   help="Root-anchor std (log2 units) for the omega prior "
-                        "(gauge fix for the shift-invariant softmax). Default: 5.0. "
-                        "Ignored when the root is decoupled (the default).")
-    p.add_argument("--origination-couple-root", action="store_true",
-                   help="Couple the ROOT into the origination (omega) prior like "
-                        "any other node (smoothed toward its children + anchored). "
-                        "By DEFAULT the root is DECOUPLED: its prior edges are cut "
-                        "and it is left free, since origination at the root (genes "
-                        "in the LCA / ancestral genome) is qualitatively different "
-                        "from per-lineage gene birth and should not be smoothed "
-                        "toward the rest of the tree.")
+    p.add_argument("--origination-l2", type=float, default=0.0,
+                   help="L2/ridge regularization strength on the origination "
+                        "logits omega (penalty lambda*sum(omega^2), shrinking "
+                        "p^O toward uniform). Only used with --origination "
+                        "optimize. Default 0 = FREE omega. This is the correct "
+                        "regularizer because p^O=softmax(omega) is a probability "
+                        "distribution (sum=1), not independent per-branch rates "
+                        "(a Brownian prior is NOT appropriate).")
+    p.add_argument("--family-batch-size", type=int, default=0,
+                   help="Process families in mini-batches of this size for the "
+                        "forward/backward (gradient accumulated across batches), "
+                        "bounding GPU memory. 0 (default) = all families at once. "
+                        "Use a few hundred for large family sets / big trees to "
+                        "avoid OOM.")
     p.add_argument("--rate-bounds", default=None,
                    help="AleRax-style box bounds on LINEAR rates as 'MIN,MAX' "
                         "(e.g. '1e-10,10'); converted to theta (log2) bounds and "
