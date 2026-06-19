@@ -529,7 +529,7 @@ def _wave_backward_uniform_kernel(
 
         v_k_val = tl.load(v_k_ptr + off, mask=mask, other=0.0)
 
-        if ACCUM_PARAM_GRADS and FAST_NOSPLIT_PARAM_GRADS and not has_splits and not COMPACT_PIBAR_SCRATCH:
+        if (ACCUM_PARAM_GRADS and FAST_NOSPLIT_PARAM_GRADS) and ((not has_splits) and (not COMPACT_PIBAR_SCRATCH)):
             diag_wt = tl.load(aw0_ptr + off, mask=mask, other=0.0)
             pibar_wt = tl.load(aw1_ptr + off, mask=mask, other=0.0)
             sl1_wt = tl.load(aw4_ptr + off, mask=mask, other=0.0)
