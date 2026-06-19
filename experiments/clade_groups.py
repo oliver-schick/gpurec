@@ -182,36 +182,32 @@ def build_leafset_categories(tree_path: str | Path, model_params_path: str | Pat
 
 # ── gpurec-side mapping (needs species_helpers) ───────────────────────────────
 def species_node_leafsets(species_helpers, S: int):
-    """Compute each gpurec node's descendant-leaf-NAME set via the parent array.
+    """Compute each gpurec node's descendant-leaf-NAME set.
 
-    Returns list[frozenset[str]] of length S. Uses ``s_P_indexes`` (parent of
-    each node; root maps to >=S or itself) and ``names`` (per-node labels; leaf
-    labels are the species names).
+    Returns list[frozenset[str]] of length S. Uses the canonical per-node parent
+    array from :func:`gpurec.core.tree_prior.species_parent_index` (``s_P_indexes``
+    itself is a 2K internal-node layout, NOT a per-node parent map), and
+    ``names`` (per-node labels; leaf labels are the species names).
     """
-    import torch  # local import so the AleRax side stays import-light
+    from gpurec.core.tree_prior import species_parent_index
 
-    parent = species_helpers["s_P_indexes"]
-    parent = parent.tolist() if hasattr(parent, "tolist") else list(parent)
+    parent_t = species_parent_index(species_helpers)  # [S] long, root -> -1
+    parent = parent_t.tolist()
     names = list(species_helpers["names"])
 
-    # leaf mask: nodes that never appear as a parent value (< S)
-    internal = {int(p) for p in parent if 0 <= int(p) < S}
+    # internal nodes = values that appear as some node's parent; leaves = rest.
+    internal = {int(p) for p in parent if int(p) >= 0}
     leaf_ids = [i for i in range(S) if i not in internal]
 
     node_leaves: List[set] = [set() for _ in range(S)]
     for l in leaf_ids:
         nm = names[l]
         cur = l
-        seen = set()
-        while True:
+        steps = 0
+        while cur >= 0 and steps <= S:
             node_leaves[cur].add(nm)
-            if cur in seen:
-                break
-            seen.add(cur)
-            p = int(parent[cur])
-            if p < 0 or p >= S or p == cur:
-                break
-            cur = p
+            cur = int(parent[cur])
+            steps += 1
     return [frozenset(s) for s in node_leaves]
 
 
