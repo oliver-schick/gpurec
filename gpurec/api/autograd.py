@@ -75,6 +75,14 @@ class ReconStaticState:
     # Warm start cache, mutated across calls
     warm_E: Optional[torch.Tensor] = None
 
+    # Fraction-missing leaf boundary (per-species, shared across families).
+    # leaf_E == leaf_obs_log == log2(fraction_missing_l) [S], -inf for
+    # internal/fully-observed species; leaf_species_mask [S] bool marks leaves.
+    # All None => every gene observed (standard sigma-only boundary).
+    leaf_E: Optional[torch.Tensor] = None
+    leaf_obs_log: Optional[torch.Tensor] = None
+    leaf_species_mask: Optional[torch.Tensor] = None
+
 
 def _apply_tensor_tree(obj: Any, fn) -> Any:
     """Recursively apply ``fn`` to every Tensor inside dicts / lists / tuples.
@@ -185,6 +193,7 @@ class _GeneReconFunction(torch.autograd.Function):
                     device=device,
                     pibar_mode=static.pibar_mode,
                     ancestors_T=static.ancestors_T,
+                    leaf_E=static.leaf_E,
                 )
                 E = E_out["E"]
                 E_s1 = E_out["E_s1"]
@@ -215,6 +224,8 @@ class _GeneReconFunction(torch.autograd.Function):
                     family_idx=(
                         static.wave_layout.get("family_idx") if static.genewise else None
                     ),
+                    leaf_obs_log=static.leaf_obs_log,
+                    leaf_species_mask=static.leaf_species_mask,
                 )
 
             # 4. NLL: compute_log_likelihood returns NLL despite the name (see
@@ -303,6 +314,8 @@ class _GeneReconFunction(torch.autograd.Function):
                 transfer_mat=transfer_mat,
                 ancestors_T=static.ancestors_T,
                 family_idx=wave_layout["family_idx"],
+                leaf_obs_log=static.leaf_obs_log,
+                leaf_species_mask=static.leaf_species_mask,
                 uniform_pibar_row_max=(
                     uniform_pibar_row_max
                     if uniform_pibar_row_max.numel() > 0
@@ -334,6 +347,7 @@ class _GeneReconFunction(torch.autograd.Function):
                 transfer_mat=transfer_mat,
                 transfer_mat_unnormalized=static.transfer_mat_unnormalized,
                 ancestors_T=static.ancestors_T,
+                leaf_E=static.leaf_E,
             )
         else:
             # Shared theta path: delegate to the public wrapper.
@@ -371,6 +385,9 @@ class _GeneReconFunction(torch.autograd.Function):
                     if uniform_pibar_row_max.numel() > 0
                     else None
                 ),
+                leaf_E=static.leaf_E,
+                leaf_obs_log=static.leaf_obs_log,
+                leaf_species_mask=static.leaf_species_mask,
             )
 
         # grad_theta is d(NLL_total)/d(theta). The forward returned NLL_total

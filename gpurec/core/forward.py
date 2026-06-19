@@ -413,6 +413,8 @@ def Pi_wave_forward(
     topk_k: int = 16,
     family_idx: torch.Tensor | None = None,
     return_original: bool = True,
+    leaf_obs_log: torch.Tensor | None = None,
+    leaf_species_mask: torch.Tensor | None = None,
 ):
     """Wave-based Pi forward pass with wave-ordered layout (v2).
 
@@ -438,6 +440,12 @@ def Pi_wave_forward(
         topk_k: number of top-k entries per clade for pibar_mode='topk' (default 16)
         family_idx: Long[C] clade→family mapping in wave-ordered space.
                     When provided, parameters are [G, ...] and indexed per-clade.
+        leaf_obs_log: optional [S] = log2(1 - p_obs_l) = log2(fraction_missing_l),
+                    with -inf at internal/fully-observed species. Together with
+                    leaf_species_mask it applies the UndatedDTL fraction-missing
+                    leaf boundary Pi_{l,gamma} = sigma + (1-sigma)(1-p_obs_l)
+                    (AleRaxSupp.tex). Default (None) => standard sigma-only boundary.
+        leaf_species_mask: optional [S] bool marking the species-tree leaves.
 
     Returns:
         dict with 'Pi' (in original clade order when requested),
@@ -452,6 +460,25 @@ def Pi_wave_forward(
 
     C = int(ccp_helpers['C'])
     S = int(species_helpers['S'])
+
+    # Fraction-missing leaf boundary (AleRaxSupp.tex): at a species leaf l, a clade
+    # that does NOT map there is "present but unobserved" with prob (1 - p_obs_l).
+    # leaf_baseline_row[l] = log2(1 - p_obs_l), -inf for internal/fully-observed
+    # species; it sits under every clade in clade_species_map, and the sigma=1
+    # mapped leaf-clades overwrite it with log2(1)=0. Default (None) => sigma only.
+    fraction_missing_active = leaf_obs_log is not None and leaf_species_mask is not None
+    leaf_baseline_row = None
+    if fraction_missing_active:
+        leaf_baseline_row = torch.full((S,), NEG_INF, device=device, dtype=dtype)
+        _lm = leaf_species_mask.to(device)
+        leaf_baseline_row[_lm] = leaf_obs_log.to(device=device, dtype=dtype)[_lm]
+
+    def _build_clade_species_map():
+        m = torch.full((C, S), NEG_INF, device=device, dtype=dtype)
+        if leaf_baseline_row is not None:
+            m[:] = leaf_baseline_row.unsqueeze(0)
+        m[leaf_row_index, leaf_col_index] = 0.0
+        return m
 
     with _nvtx_range("Pi setup tensors"):
         _PI_INIT = torch.finfo(dtype).min
@@ -511,6 +538,9 @@ def Pi_wave_forward(
         and not use_uniform_two_kernel
         and not use_uniform_spmm
         and leaf_species_index is not None
+        # in-kernel sigma hard-codes the off-leaf term to -inf; the fraction-missing
+        # baseline needs the explicit [W,S] leaf_term path instead.
+        and not fraction_missing_active
     )
     reuse_forward_pibar_stats = bool(
         use_uniform_fused
@@ -573,14 +603,12 @@ def Pi_wave_forward(
                 clade_species_map = None
                 leaf_term = None
             else:
-                clade_species_map = torch.full((C, S), NEG_INF, device=device, dtype=dtype)
-                clade_species_map[leaf_row_index, leaf_col_index] = 0.0
+                clade_species_map = _build_clade_species_map()
                 leaf_term = None if batched else log_pS + clade_species_map
             transfer_mat_T = None
             transfer_mat_c = None
         else:
-            clade_species_map = torch.full((C, S), NEG_INF, device=device, dtype=dtype)
-            clade_species_map[leaf_row_index, leaf_col_index] = 0.0
+            clade_species_map = _build_clade_species_map()
             leaf_term = None if batched else log_pS + clade_species_map
             if transfer_mat is not None:
                 if transfer_mat.ndim == 2:
@@ -609,9 +637,16 @@ def Pi_wave_forward(
             )
 
     def _get_leaf_mask(ws, we):
-        """Return [W, S] mask with 0.0 at leaf positions, NEG_INF elsewhere."""
+        """Return [W, S] leaf term: 0.0 at mapped leaves, NEG_INF elsewhere.
+
+        With fraction-missing active, the off-leaf species-leaf columns carry the
+        log2(1 - p_obs) baseline instead of NEG_INF.
+        """
         W = we - ws
-        lwt = torch.full((W, S), NEG_INF, device=device, dtype=dtype)
+        if leaf_baseline_row is not None:
+            lwt = leaf_baseline_row.unsqueeze(0).expand(W, S).clone()
+        else:
+            lwt = torch.full((W, S), NEG_INF, device=device, dtype=dtype)
         m = (leaf_row_index >= ws) & (leaf_row_index < we)
         if m.any():
             lwt[leaf_row_index[m] - ws, leaf_col_index[m]] = 0.0

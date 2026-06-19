@@ -35,6 +35,82 @@ from gpurec.core.scheduling import compute_clade_waves
 from .autograd import ReconStaticState, _GeneReconFunction, _apply_to_static
 from .modes import _default_theta_init, _mode_to_flags
 
+NEG_INF = float("-inf")
+
+
+def _species_leaf_mask(species_helpers: dict, S: int, device) -> torch.Tensor:
+    """[S] bool: True at species-tree leaves (never an internal parent)."""
+    sP = species_helpers["s_P_indexes"].to(device)
+    internal = sP[sP < S].unique()
+    leaf_mask = torch.ones(S, dtype=torch.bool, device=device)
+    leaf_mask[internal] = False
+    return leaf_mask
+
+
+def build_fraction_missing_tensors(
+    species_helpers: dict,
+    S: int,
+    device,
+    dtype,
+    fraction_missing,
+):
+    """Map a per-species ``fraction_missing`` to the leaf boundary tensors.
+
+    ``fraction_missing`` may be:
+      * ``None``                  -> every gene observed (returns all-None);
+      * a Python ``float``        -> same value at every species-tree leaf;
+      * a ``dict {name: frac}``   -> per-leaf by species name (absent names = 0);
+      * a length-``S`` 1-D tensor/list -> per-species (internal entries ignored).
+
+    ``fraction_missing_l = 1 - p_obs_l`` in ``[0, 1)``. Returns
+    ``(leaf_E, leaf_obs_log, leaf_species_mask)`` where ``leaf_E == leaf_obs_log
+    == log2(fraction_missing_l)`` ([S], -inf at internal/fully-observed species)
+    and ``leaf_species_mask`` is the [S] bool leaf mask. Returns ``(None, None,
+    None)`` when ``fraction_missing`` is None or all-zero (no overhead path).
+    """
+    if fraction_missing is None:
+        return None, None, None
+
+    leaf_mask = _species_leaf_mask(species_helpers, S, device)
+    fm = torch.zeros(S, dtype=dtype, device=device)
+
+    if isinstance(fraction_missing, dict):
+        name_to_idx = species_helpers.get("species_name_to_index")
+        names = species_helpers.get("names")
+        for key, val in fraction_missing.items():
+            if name_to_idx is not None and key in name_to_idx:
+                idx = int(name_to_idx[key])
+            elif names is not None and key in names:
+                idx = names.index(key)
+            else:
+                raise KeyError(f"fraction_missing species name {key!r} not in species tree")
+            fm[idx] = float(val)
+    elif isinstance(fraction_missing, (int, float)):
+        fm[leaf_mask] = float(fraction_missing)
+    else:
+        t = torch.as_tensor(fraction_missing, dtype=dtype, device=device).reshape(-1)
+        if t.numel() != S:
+            raise ValueError(
+                f"fraction_missing tensor has length {t.numel()}, expected S={S} "
+                "(per-species) or pass a dict keyed by species name."
+            )
+        fm = t.clone()
+
+    # Internal species never carry a missing term.
+    fm = torch.where(leaf_mask, fm, torch.zeros((), dtype=dtype, device=device))
+    if float(fm.max()) <= 0.0:
+        return None, None, None  # nothing missing -> keep the fast default path
+
+    if float(fm.max()) >= 1.0 or float(fm.min()) < 0.0:
+        raise ValueError("fraction_missing values must lie in [0, 1).")
+
+    leaf_fm_log = torch.where(
+        fm > 0,
+        torch.log2(fm.clamp_min(torch.finfo(dtype).tiny)),
+        torch.full_like(fm, NEG_INF),
+    )
+    return leaf_fm_log, leaf_fm_log, leaf_mask
+
 
 def _build_static_state(
     dataset: GeneDataset,
@@ -53,6 +129,7 @@ def _build_static_state(
     gmres_restart: int,
     max_wave_size: Optional[int] = 32768,
     max_root_wave_size: Optional[int] = None,
+    fraction_missing: Any = None,
 ) -> ReconStaticState:
     """Absorb the wave-layout boilerplate that lives in
     ``experiments/validate_three_modes.py:100-149`` and
@@ -132,6 +209,11 @@ def _build_static_state(
         pibar_mode=pibar_mode, device=device, dtype=dtype,
     )
 
+    # 2b. Fraction-missing leaf boundary (per-species, shared across families).
+    leaf_E, leaf_obs_log, leaf_species_mask = build_fraction_missing_tensors(
+        species_helpers, int(dataset.S), device, dtype, fraction_missing,
+    )
+
     # 3. Other static tensors
     unnorm_row_max = dataset.unnorm_row_max.to(device=device, dtype=dtype)
     transfer_mat_unnormalized = (
@@ -163,6 +245,9 @@ def _build_static_state(
         cg_tol=cg_tol,
         cg_maxiter=cg_maxiter,
         gmres_restart=gmres_restart,
+        leaf_E=leaf_E,
+        leaf_obs_log=leaf_obs_log,
+        leaf_species_mask=leaf_species_mask,
     )
 
 
@@ -194,6 +279,7 @@ class GeneReconModel(torch.nn.Module):
         theta_init: Optional[torch.Tensor] = None,
         max_wave_size: Optional[int] = 32768,
         max_root_wave_size: Optional[int] = None,
+        fraction_missing: Any = None,
     ):
         super().__init__()
         if dataset.pairwise:
@@ -239,6 +325,7 @@ class GeneReconModel(torch.nn.Module):
             gmres_restart=gmres_restart,
             max_wave_size=max_wave_size,
             max_root_wave_size=max_root_wave_size,
+            fraction_missing=fraction_missing,
         )
 
     # ──────────────────────────────────────────────────────────────────
@@ -257,6 +344,7 @@ class GeneReconModel(torch.nn.Module):
         theta_init_rates: Optional[tuple[float, float, float]] = None,
         preprocess_cache_dir: str | os.PathLike | None = None,
         refresh_preprocess_cache: bool = False,
+        fraction_missing: Any = None,
         **solver_kwargs,
     ) -> "GeneReconModel":
         """One-liner: Newick paths → ready-to-optimize model.
@@ -285,6 +373,11 @@ class GeneReconModel(torch.nn.Module):
             same cache avoids reparsing/rebuilding unchanged gene trees.
         refresh_preprocess_cache : bool
             Ignore existing preprocessing cache entries and overwrite them.
+        fraction_missing : float | dict[str, float] | tensor[S] | None
+            Per-species UndatedDTL fraction-missing (``1 - p_obs``). A float
+            applies to every leaf; a dict maps species leaf names -> fraction;
+            a length-S tensor is per-species. ``None`` (default) => every gene
+            observed. See ``build_fraction_missing_tensors``.
         """
         genewise, specieswise, pairwise = _mode_to_flags(mode)
         if isinstance(device, str):
@@ -319,6 +412,7 @@ class GeneReconModel(torch.nn.Module):
             mode=mode,
             pibar_mode=pibar_mode,
             theta_init=theta_init,
+            fraction_missing=fraction_missing,
             **solver_kwargs,
         )
 

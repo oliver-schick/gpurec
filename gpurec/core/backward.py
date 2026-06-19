@@ -402,6 +402,8 @@ def Pi_wave_backward(
     ancestors_T=None,
     family_idx=None,
     uniform_pibar_row_max=None,
+    leaf_obs_log=None,
+    leaf_species_mask=None,
 ):
     """Wave-decomposed backward pass for implicit gradient computation.
 
@@ -825,12 +827,25 @@ def Pi_wave_backward(
     leaf_col_index = wave_layout['leaf_col_index']
     leaf_species_index = wave_layout.get('leaf_species_index')
 
+    # Fraction-missing leaf boundary (mirror of Pi_wave_forward): off-leaf
+    # species-leaf columns carry log2(1 - p_obs_l) instead of -inf. The leaf
+    # term is constant in Pi, so this only reconstructs the correct forward
+    # weights; the in-kernel/dense-index sigma paths can't represent it, so we
+    # fall back to the explicit [W,S] leaf_term path when it is active.
+    fraction_missing_active = leaf_obs_log is not None and leaf_species_mask is not None
+    leaf_baseline_row = None
+    if fraction_missing_active:
+        leaf_baseline_row = torch.full((S,), NEG_INF, device=device, dtype=dtype)
+        _lm_fm = leaf_species_mask.to(device)
+        leaf_baseline_row[_lm_fm] = leaf_obs_log.to(device=device, dtype=dtype)[_lm_fm]
+
     use_uniform_leaf_index = bool(
         os.environ.get("GPUREC_BACKWARD_LEAF_INDEX", "1") != "0"
         and _auto_wrapped
         and pibar_mode == 'uniform'
         and device.type == 'cuda'
         and leaf_species_index is not None
+        and not fraction_missing_active
     )
     uniform_leaf_logp = None
     if use_uniform_leaf_index:
@@ -873,6 +888,7 @@ def Pi_wave_backward(
         os.environ.get("GPUREC_DENSE_LEAF_MASK_FROM_INDEX", "0") != "0"
         and leaf_species_index is not None
         and not (can_use_fused_uniform_backward and use_uniform_leaf_index)
+        and not fraction_missing_active
     )
     leaf_species_lanes = (
         torch.arange(S, device=device)
@@ -896,7 +912,10 @@ def Pi_wave_backward(
                 leaf_neg_inf,
             )
 
-        lwt = torch.full((W, S), NEG_INF, device=device, dtype=dtype)
+        if leaf_baseline_row is not None:
+            lwt = leaf_baseline_row.unsqueeze(0).expand(W, S).clone()
+        else:
+            lwt = torch.full((W, S), NEG_INF, device=device, dtype=dtype)
         mask = (leaf_row_index >= ws) & (leaf_row_index < we)
         if mask.any():
             lwt[leaf_row_index[mask] - ws, leaf_col_index[mask]] = 0.0
