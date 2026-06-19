@@ -156,8 +156,8 @@ def main():
     E_out = E_fixed_point(
         species_helpers=sp_gpu, log_pS=log_pS, log_pD=log_pD, log_pL=log_pL,
         transfer_mat=transfer_mat, max_transfer_mat=mt, max_iters=4000, tolerance=1e-10,
-        dtype=dtype, device=device, pibar_mode='uniform', ancestors_T=ancestors_T,
-        leaf_E=leaf_E)
+        warm_start_E=None, dtype=dtype, device=device, pibar_mode='uniform',
+        ancestors_T=ancestors_T, leaf_E=leaf_E)
     Pi_out = Pi_wave_forward(
         wave_layout=wave_layout, species_helpers=sp_gpu, E=E_out['E'], Ebar=E_out['E_bar'],
         E_s1=E_out['E_s1'], E_s2=E_out['E_s2'], log_pS=log_pS, log_pD=log_pD, log_pL=log_pL,
