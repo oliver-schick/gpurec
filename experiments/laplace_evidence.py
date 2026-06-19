@@ -239,7 +239,10 @@ def main():
         if _opt_orig:
             # DIRECT omega gradient (mirrors wave_optimizer): autograd through the
             # origination-weighted numerators + shared survival denom at fixed Pi,E.
-            root_pi_all = Pi_b["Pi"][wave_layout["root_clade_ids"]].detach()  # [n_fam,S]
+            # Pi_b["Pi"] is in ORIGINAL clade order (Pi[perm]); index it with the
+            # ORIGINAL-order root ids (NOT the wave-permuted wave_layout ids), exactly
+            # as wave_optimizer + compute_log_likelihood do. (root_clade_ids from L112.)
+            root_pi_all = Pi_b["Pi"][root_clade_ids].detach()  # [n_fam,S]
             E_det = E_out["E"].detach()
             log_one_minus_E = _slog2(1.0 - torch.exp2(E_det))
             with torch.enable_grad():
