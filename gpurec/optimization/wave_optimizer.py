@@ -95,6 +95,7 @@ def optimize_theta_wave(
     origination_decouple_root: bool = True,
     origination_l2: float = 0.0,
     group_index: torch.Tensor | None = None,
+    omega_group_index: torch.Tensor | None = None,
 ):
     """Optimize theta using wave forward/backward + implicit gradient.
 
@@ -275,15 +276,65 @@ def optimize_theta_wave(
     _opt_origination = origination == 'optimize'
     # Determine S (number of species branches) for the omega vector.
     _S_branches = int(species_helpers['S'])
+
+    # --- GROUPED ORIGINATION (per-clade O category) -------------------------
+    # When ``omega_group_index`` [S] (long, 0..G_O-1) is given with
+    # origination='optimize', omega is NOT a free [S] per-branch logit vector:
+    # instead G_O free origination-category logits are optimised and EXPANDED to
+    # per-branch via omega[s] = omega_g[omega_group_index[s]]; the omega gradient
+    # is REDUCED back per category by summation. This replicates AleRax's DTLO
+    # parametrization (e.g. DPANN/Eury/TackA each own O, all others share one),
+    # the per-branch origination DISTRIBUTION that lifts the true-root clades
+    # above the small-genome attraction artefact. None (default) -> free omega.
+    _use_omega_groups = (omega_group_index is not None) and _opt_origination
+    _omega_group_index_t = None
+    _n_omega_groups = 0
+    if _use_omega_groups:
+        _omega_group_index_t = omega_group_index.to(device=device, dtype=torch.long).reshape(-1)
+        if _omega_group_index_t.numel() != _S_branches:
+            raise ValueError(
+                f"omega_group_index must have S={_S_branches} entries, "
+                f"got {_omega_group_index_t.numel()}"
+            )
+        if int(_omega_group_index_t.min().item()) < 0:
+            raise ValueError("omega_group_index entries must be >= 0")
+        _n_omega_groups = int(_omega_group_index_t.max().item()) + 1
+
+    def _expand_omega(omega_param):
+        """[G_O] category logits -> [S] per-branch (no-op when not grouped)."""
+        if not _use_omega_groups:
+            return omega_param
+        return omega_param.index_select(0, _omega_group_index_t)
+
+    def _reduce_omega(grad_full):
+        """[S] per-branch omega grad -> [G_O] per-category (no-op when not grouped)."""
+        if not _use_omega_groups:
+            return grad_full
+        g = torch.zeros(_n_omega_groups, dtype=grad_full.dtype, device=grad_full.device)
+        g.index_add_(0, _omega_group_index_t, grad_full)
+        return g
+
+    # Size of the omega block in the scipy vector (categories if grouped).
+    _n_omega_param = _n_omega_groups if _use_omega_groups else _S_branches
+
     if _opt_origination:
         if omega_init is None:
-            _omega0 = torch.zeros(_S_branches, dtype=dtype, device=device)
+            _omega_full0 = torch.zeros(_S_branches, dtype=dtype, device=device)
         else:
-            _omega0 = omega_init.to(device=device, dtype=dtype).reshape(-1).clone()
-        if _omega0.numel() != _S_branches:
+            _omega_full0 = omega_init.to(device=device, dtype=dtype).reshape(-1).clone()
+        if _omega_full0.numel() != _S_branches:
             raise ValueError(
-                f"omega_init must have S={_S_branches} entries, got {_omega0.numel()}"
+                f"omega_init must have S={_S_branches} entries, got {_omega_full0.numel()}"
             )
+        if _use_omega_groups:
+            # Reduce the per-branch init to per-category logits (mean over members).
+            _cnt = torch.zeros(_n_omega_groups, dtype=dtype, device=device)
+            _cnt.index_add_(0, _omega_group_index_t, torch.ones_like(_omega_full0))
+            _osum = torch.zeros(_n_omega_groups, dtype=dtype, device=device)
+            _osum.index_add_(0, _omega_group_index_t, _omega_full0)
+            _omega0 = _osum / _cnt.clamp(min=1)
+        else:
+            _omega0 = _omega_full0
         if optimizer != 'lbfgs':
             raise NotImplementedError(
                 "origination='optimize' is only supported with optimizer='lbfgs'"
@@ -707,8 +758,10 @@ def optimize_theta_wave(
             theta_param = theta_flat.reshape(theta_shape).clamp(min=_THETA_MIN)
             theta_d = _expand_theta(theta_param)   # [G,3]->[S,3] (no-op when ungrouped)
             if _opt_origination:
-                omega_d = x_flat[n_theta:].reshape(_S_branches)
+                omega_param = x_flat[n_theta:].reshape(_n_omega_param)
+                omega_d = _expand_omega(omega_param)   # [G_O]->[S] (no-op when ungrouped)
             else:
+                omega_param = None
                 omega_d = None
 
             t_start = time.perf_counter()
@@ -716,11 +769,14 @@ def optimize_theta_wave(
                 nll, grad_theta, statsG, E_out, grad_omega = _forward_backward(
                     theta_d, warm_E_ref[0], omega_d=omega_d,
                 )
+                # Reduce the per-branch omega grad to per-category (chain rule).
+                grad_omega = _reduce_omega(grad_omega)
             else:
                 nll, grad_theta, statsG, E_out = _forward_backward(theta_d, warm_E_ref[0])
                 grad_omega = None
             nll, grad_theta = _apply_prior(theta_d, nll, grad_theta)
-            nll, grad_omega = _apply_origination_prior(omega_d, nll, grad_omega)
+            # L2 ridge on the (possibly grouped) origination logits.
+            nll, grad_omega = _apply_origination_prior(omega_param, nll, grad_omega)
             # Reduce the per-branch [S,3] gradient to per-group [G,3] (chain rule
             # of the expand map); no-op when ungrouped.
             grad_param = _reduce_grad(grad_theta)
@@ -792,7 +848,8 @@ def optimize_theta_wave(
         # (no-op when ungrouped).
         theta_final = _expand_theta(x_final[:n_theta].reshape(theta_shape))
         if _opt_origination:
-            omega_final = x_final[n_theta:].reshape(_S_branches)
+            # Expand grouped [G_O] -> per-branch [S] for eval/output (no-op ungrouped).
+            omega_final = _expand_omega(x_final[n_theta:].reshape(_n_omega_param))
         else:
             omega_final = None
 
@@ -865,6 +922,7 @@ def optimize_theta_wave(
                     origination_decouple_root=origination_decouple_root,
                     origination_l2=origination_l2,
                     group_index=group_index,
+                    omega_group_index=omega_group_index,
                 )
                 # Merge histories: float32 phase first, then float64 phase
                 result64["history"] = history + result64["history"]

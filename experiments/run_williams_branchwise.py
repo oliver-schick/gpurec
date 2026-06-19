@@ -496,6 +496,7 @@ def _run(args, data_dir: Path):
 
     # Optional: CLADE-GROUPED ("branch wise") model from AleRax's output.
     group_index = None
+    omega_group_index = None
     group_info = {"clade_groups": None}
     if args.clade_groups:
         from clade_groups import group_index_for_species_helpers
@@ -526,6 +527,16 @@ def _run(args, data_dir: Path):
         }
         print(f"      CLADE-GROUPED model: {n_groups} rate categories over "
               f"S={S} branches (from AleRax branch-wise {cg_dir.name})", flush=True)
+        # When optimizing origination, also group O into AleRax's per-clade O
+        # categories (DTLO: DPANN/Eury/TackA own O, all others shared).
+        if args.origination == "optimize":
+            from clade_groups import omega_group_index_for_species_helpers
+            omega_group_index, n_o_groups = omega_group_index_for_species_helpers(
+                species_helpers, str(cg_tree), str(cg_mp))
+            if omega_group_index is not None:
+                group_info["n_origination_groups"] = n_o_groups
+                print(f"      GROUPED ORIGINATION: {n_o_groups} O categories",
+                      flush=True)
 
     # 2. Load families.
     print(f"[2/5] Parsing {len(ale_paths)} .ale families "
@@ -714,6 +725,7 @@ def _run(args, data_dir: Path):
         omega_init=omega_init,
         origination_l2=origination_l2,
         group_index=group_index,
+        omega_group_index=omega_group_index,
     )
     elapsed = time.time() - t0
 

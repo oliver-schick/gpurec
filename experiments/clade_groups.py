@@ -246,6 +246,31 @@ def branch_params_from_alerax(species_helpers, tree_path, model_params_path):
     return rate_branch, orig_branch, diag
 
 
+def omega_group_index_for_species_helpers(species_helpers, tree_path, model_params_path,
+                                          round_sig: int = 9):
+    """Per-branch ORIGINATION category index [S] from AleRax's O column.
+
+    Groups gpurec nodes by identical AleRax origination value O (e.g. AleRax's
+    DTLO: DPANN/Eury/TackA each own O, all others share one). Returns
+    (omega_group_index[S] long, n_groups). n_groups==0 / None if no O column.
+    """
+    import torch
+
+    rate_branch, orig_branch, diag = branch_params_from_alerax(
+        species_helpers, tree_path, model_params_path)
+    if orig_branch is None:
+        return None, 0
+    vals = orig_branch.tolist()
+    key_to_cat = {}
+    gi = torch.empty(len(vals), dtype=torch.long)
+    for s, v in enumerate(vals):
+        key = round(float(v), round_sig)
+        if key not in key_to_cat:
+            key_to_cat[key] = len(key_to_cat)
+        gi[s] = key_to_cat[key]
+    return gi, len(key_to_cat)
+
+
 def group_index_for_species_helpers(species_helpers, tree_path, model_params_path,
                                      round_sig: int = 6):
     """Build ``group_index[S]`` (long) + category rate table for a gpurec run.
