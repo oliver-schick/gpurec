@@ -615,20 +615,15 @@ CladeData amalgamate_clades_and_splits(
   std::vector<std::unique_ptr<TreeNode>> gene_trees;
   gene_trees.reserve(gene_paths.size());
 
-  // Each path may hold ONE tree (a single gene tree) OR MANY (a bootstrap /
-  // posterior sample, e.g. a UFBoot file with one tree per line). Read all trees
-  // from every path so a sample amalgamates into a multi-tree CCP.
   for (const std::string &path : gene_paths) {
-    std::vector<std::unique_ptr<TreeNode>> trees = parse_newick_file_all(path);
-    for (std::unique_ptr<TreeNode> &tree : trees) {
-      std::vector<std::string> tree_leaves;
-      std::unordered_map<std::string, int> tree_leaf_map;
-      collect_leaf_names(tree.get(), tree_leaves, tree_leaf_map);
-      for (const std::string &name : tree_leaves) {
-        all_leaves_set.insert(name);
-      }
-      gene_trees.push_back(std::move(tree));
+    std::unique_ptr<TreeNode> tree = parse_newick_file(path);
+    std::vector<std::string> tree_leaves;
+    std::unordered_map<std::string, int> tree_leaf_map;
+    collect_leaf_names(tree.get(), tree_leaves, tree_leaf_map);
+    for (const std::string &name : tree_leaves) {
+      all_leaves_set.insert(name);
     }
+    gene_trees.push_back(std::move(tree));
   }
 
   // Create unified leaf ordering

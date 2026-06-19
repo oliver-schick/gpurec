@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -126,52 +125,6 @@ std::unique_ptr<TreeNode> parse_newick_file(const std::string &path) {
   std::string text = buffer.str();
   NewickParser parser(text);
   return std::unique_ptr<TreeNode>(parser.parse());
-}
-
-TreeNode *NewickParser::parse_one() {
-  TreeNode *root = parse_subtree();
-  skip_whitespace();
-  if (pos_ < text_.size() && text_[pos_] == ';') {
-    ++pos_;
-  }
-  return root;
-}
-
-bool NewickParser::at_end() {
-  skip_whitespace();
-  return pos_ >= text_.size();
-}
-
-std::vector<std::unique_ptr<TreeNode>>
-parse_newick_file_all(const std::string &path) {
-  std::ifstream f(path);
-  if (!f) {
-    throw std::runtime_error("Unable to open Newick file: " + path);
-  }
-  std::ostringstream buffer;
-  buffer << f.rdbuf();
-  std::string text = buffer.str();
-
-  size_t max_trees = 0;  // 0 = read all
-  if (const char *env = std::getenv("GPUREC_MAX_TREES_PER_FAMILY")) {
-    long v = std::atol(env);
-    if (v > 0) {
-      max_trees = static_cast<size_t>(v);
-    }
-  }
-
-  NewickParser parser(text);
-  std::vector<std::unique_ptr<TreeNode>> trees;
-  while (!parser.at_end()) {
-    trees.push_back(std::unique_ptr<TreeNode>(parser.parse_one()));
-    if (max_trees != 0 && trees.size() >= max_trees) {
-      break;
-    }
-  }
-  if (trees.empty()) {
-    throw std::runtime_error("No Newick trees parsed from file: " + path);
-  }
-  return trees;
 }
 
 void collect_nodes_postorder(TreeNode *node, std::vector<TreeNode *> &order) {
