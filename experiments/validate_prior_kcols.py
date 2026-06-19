@@ -103,6 +103,42 @@ def check_k3_reference():
     return ok
 
 
+def decouple_root(parent):
+    """Mirror wave_optimizer: cut the root's incident edges (children -> -1)."""
+    p = parent.clone()
+    arange = torch.arange(p.shape[0])
+    is_root = (p < 0) | (p == arange)
+    root = int(is_root.nonzero()[0])
+    p[p == root] = -1
+    return p, root
+
+
+def check_decouple_root():
+    """Root decoupling: cut root edges + sigma_root=inf -> root is FREE.
+
+    Verifies (a) the analytic gradient still matches finite differences on the
+    decoupled graph, (b) the root row gradient is exactly 0 (no edge, no anchor),
+    and (c) the penalty is invariant to perturbing ONLY the root weight (the root
+    is not coupled to the rest of the tree)."""
+    S = 14
+    parent = make_tree(S)
+    pdec, root = decouple_root(parent)
+    omega = torch.randn(S, 1, dtype=DT)
+    sigma, sigma_root, mu = 0.5, float("inf"), 0.0
+    pen, grad = brownian_log_prior_and_grad(omega, pdec, sigma, sigma_root, mu)
+    g_fd = fd_grad(omega, pdec, sigma, sigma_root, mu)
+    err = (grad - g_fd).abs().max().item()
+    root_g = abs(float(grad[root, 0]))
+    # Perturb only the root weight; decoupled penalty must not change.
+    o2 = omega.clone(); o2[root, 0] += 2.5
+    pen2 = brownian_log_prior_and_grad(o2, pdec, sigma, sigma_root, mu)[0]
+    d_root = abs(float(pen) - float(pen2))
+    ok = err < 1e-5 and root_g < 1e-12 and d_root < 1e-12
+    print(f"  [decouple-root] FD err={err:.2e}  |grad[root]|={root_g:.2e}  "
+          f"|dP when root perturbed|={d_root:.2e}  {'OK' if ok else 'FAIL'}")
+    return ok
+
+
 def main():
     print("Brownian prior K-generalization validation (CPU, float64)")
     results = []
@@ -114,6 +150,7 @@ def main():
     results.append(check(15, 1, 0.7, 5.0, 0.0, "K=1 omega scalar"))
     results.append(check(12, 4, 0.6, 4.0, 0.0, "K=4 (DLT+O) scalar"))
     results.append(check_shift_invariance())
+    results.append(check_decouple_root())
     ok = all(results)
     print(f"\n{'ALL PASS' if ok else 'SOME FAILED'}")
     return 0 if ok else 1

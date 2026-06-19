@@ -92,6 +92,7 @@ def optimize_theta_wave(
     origination_sigma=None,
     origination_root_sigma: float = 5.0,
     origination_mu: float = 0.0,
+    origination_decouple_root: bool = True,
 ):
     """Optimize theta using wave forward/backward + implicit gradient.
 
@@ -193,10 +194,21 @@ def optimize_theta_wave(
         The Brownian increment penalty is shift-invariant, so it respects the
         softmax gauge; the root anchor pins the otherwise-free global shift.
     origination_root_sigma : float
-        Root-anchor std (log2 units) for the omega prior. Default 5.0.
+        Root-anchor std (log2 units) for the omega prior. Default 5.0. IGNORED
+        when ``origination_decouple_root`` is True (the root is left free).
     origination_mu : float
         Root-anchor centre (log2 units) for the omega prior. Default 0.0 (the
         anchor value is a gauge choice; softmax makes any global shift a no-op).
+    origination_decouple_root : bool
+        If True (default), the ROOT is decoupled from the omega prior: the
+        root's incident edges are cut (its children are NOT smoothed toward the
+        root) and the root anchor is dropped, so the root origination weight is
+        FREE — set by the data, not pulled toward the rest of the tree.
+        Origination at the root (genes present in the LCA / ancestral genome) is
+        qualitatively different from lineage-specific gene birth, so it should
+        not be coupled to the per-lineage origination rates. Non-root branches
+        are still smoothed within their clades. If False, the root participates
+        in the prior like any node (coupled to its children + anchored).
 
     Returns
     -------
@@ -268,6 +280,7 @@ def optimize_theta_wave(
     _orig_sigma = None
     _orig_root_sigma = None
     _orig_mu = None
+    _orig_parent_index = None
     if _use_prior or _use_orig_prior:
         from gpurec.core.tree_prior import (
             brownian_log_prior_and_grad as _brownian_prior,
@@ -293,8 +306,23 @@ def optimize_theta_wave(
             _prior_mu = brownian_mu
     if _use_orig_prior:
         _orig_sigma = float(origination_sigma)
-        _orig_root_sigma = float(origination_root_sigma)
         _orig_mu = float(origination_mu)
+        if origination_decouple_root:
+            # Decouple the root: cut its incident edges so the root and each of
+            # its child-subtrees are not smoothed across the root, and drop the
+            # root anchor. The root origination weight is then FREE (data-driven),
+            # not pulled toward the per-lineage origination of the rest of the
+            # tree. Non-root branches stay smoothed within their clades.
+            _opi = _prior_parent_index.clone()
+            _arange_S = torch.arange(_opi.shape[0], device=device)
+            _is_root = (_opi < 0) | (_opi == _arange_S)
+            _root_id = int(torch.nonzero(_is_root, as_tuple=False).flatten()[0].item())
+            _opi[_opi == _root_id] = -1          # cut root -> child edges
+            _orig_parent_index = _opi
+            _orig_root_sigma = float('inf')       # no anchor (root left free)
+        else:
+            _orig_parent_index = _prior_parent_index
+            _orig_root_sigma = float(origination_root_sigma)
 
     def _apply_prior(theta_d, nll, grad_theta):
         """Add the Brownian penalty to nll and its gradient to grad_theta."""
@@ -310,7 +338,7 @@ def optimize_theta_wave(
         if not _use_orig_prior or omega_d is None or grad_omega is None:
             return nll, grad_omega
         penalty, p_grad = _brownian_prior(
-            omega_d.reshape(-1, 1), _prior_parent_index,
+            omega_d.reshape(-1, 1), _orig_parent_index,
             _orig_sigma, _orig_root_sigma, _orig_mu,
         )
         return nll + float(penalty.item()), grad_omega + p_grad.reshape(-1)
@@ -802,6 +830,7 @@ def optimize_theta_wave(
                     origination_sigma=origination_sigma,
                     origination_root_sigma=origination_root_sigma,
                     origination_mu=origination_mu,
+                    origination_decouple_root=origination_decouple_root,
                 )
                 # Merge histories: float32 phase first, then float64 phase
                 result64["history"] = history + result64["history"]
@@ -839,6 +868,7 @@ def optimize_theta_wave(
                     "sigma": _orig_sigma,
                     "root_sigma": _orig_root_sigma,
                     "mu": _orig_mu,
+                    "decouple_root": bool(origination_decouple_root),
                 }
         return result_dict
 

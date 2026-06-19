@@ -636,6 +636,7 @@ def _run(args, data_dir: Path):
             origination_info.update({
                 "origination_sigma": origination_sigma,
                 "origination_root_sigma": origination_root_sigma,
+                "decouple_root": (not args.origination_couple_root),
                 "units": "log2",
             })
 
@@ -651,9 +652,10 @@ def _run(args, data_dir: Path):
         print(f"      prior=none (free per-branch rates)", flush=True)
     if args.origination == "optimize":
         if origination_sigma is not None:
+            _root_mode = ("root COUPLED+anchored" if args.origination_couple_root
+                          else "root DECOUPLED (free, edges cut)")
             print(f"      origination=optimize  WITH Brownian prior on omega: "
-                  f"sigma={origination_sigma} (log2)  "
-                  f"root_sigma={origination_root_sigma} (log2)", flush=True)
+                  f"sigma={origination_sigma} (log2)  {_root_mode}", flush=True)
         else:
             print(f"      origination=optimize  (FREE per-branch omega, no prior)",
                   flush=True)
@@ -687,6 +689,7 @@ def _run(args, data_dir: Path):
         omega_init=omega_init,
         origination_sigma=origination_sigma,
         origination_root_sigma=origination_root_sigma,
+        origination_decouple_root=(not args.origination_couple_root),
     )
     elapsed = time.time() - t0
 
@@ -867,7 +870,16 @@ def _parse_args(argv=None):
                         "p^O_e (matching AleRax's near-constant origination).")
     p.add_argument("--origination-root-sigma", type=float, default=5.0,
                    help="Root-anchor std (log2 units) for the omega prior "
-                        "(gauge fix for the shift-invariant softmax). Default: 5.0")
+                        "(gauge fix for the shift-invariant softmax). Default: 5.0. "
+                        "Ignored when the root is decoupled (the default).")
+    p.add_argument("--origination-couple-root", action="store_true",
+                   help="Couple the ROOT into the origination (omega) prior like "
+                        "any other node (smoothed toward its children + anchored). "
+                        "By DEFAULT the root is DECOUPLED: its prior edges are cut "
+                        "and it is left free, since origination at the root (genes "
+                        "in the LCA / ancestral genome) is qualitatively different "
+                        "from per-lineage gene birth and should not be smoothed "
+                        "toward the rest of the tree.")
     p.add_argument("--rate-bounds", default=None,
                    help="AleRax-style box bounds on LINEAR rates as 'MIN,MAX' "
                         "(e.g. '1e-10,10'); converted to theta (log2) bounds and "
