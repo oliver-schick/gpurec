@@ -102,6 +102,7 @@ def optimize_theta_wave(
     origination_root_lambda: float = 0.0,
     origination_dirichlet_c: float = 0.0,
     origination_vertical_pi: torch.Tensor | None = None,
+    origination_barrier_kind: str = "meanlog",
 ):
     """Optimize theta using wave forward/backward + implicit gradient.
 
@@ -420,6 +421,10 @@ def optimize_theta_wave(
     # BEFORE the omega-group reduction, so it composes with grouped origination.
     _dir_c = float(origination_dirichlet_c) if _opt_origination else 0.0
     _dir_pi = None
+    _barrier_kind = str(origination_barrier_kind).lower()
+    if _barrier_kind not in ("meanlog", "simpson", "renyi2"):
+        raise ValueError(f"origination_barrier_kind must be meanlog|simpson|renyi2, "
+                         f"got {origination_barrier_kind!r}")
     _use_dirichlet = (origination_vertical_pi is not None) and _dir_c > 0.0
     if _use_dirichlet:
         _dir_pi = origination_vertical_pi.to(device=device, dtype=dtype).reshape(-1)
@@ -507,17 +512,40 @@ def optimize_theta_wave(
         return nll + pen, grad_omega + grad
 
     def _apply_origination_dirichlet(omega_d, nll, grad_omega):
-        """Asymmetric Dirichlet (vertical) prior: penalty = -c * sum_e pi_e log2 p^O_e
-        (= Dirichlet(1 + c*pi) log-density, up to const = c*KL(pi||p^O)). Pulls p^O
-        toward the root-concentrated profile pi and forbids the degenerate vertex.
-        Grad in base-2 logit space: d penalty / d omega_e = c (p^O_e - pi_e). Operates
-        on the EXPANDED per-branch omega [S]; the caller reduces to groups afterwards."""
+        """Anti-concentration barrier on the origination distribution p^O. Three kinds:
+
+        - 'meanlog' (reverse KL, default): pen = -c * sum_e pi_e log2 p^O_e
+          (= Dirichlet(1+c*pi) log-density = c*KL(pi||p^O)). Grad = c (p^O - pi).
+          NB this divergence is dominated by NEAR-ZERO p^O_e (it -> inf as any
+          p^O_e -> 0), so it over-penalizes a *structured* p^O (real backbone mass,
+          ~zero on tips) more than a bland near-uniform one -- it fights the wrong
+          tail and rewards the SGA-friendly bland distribution.
+
+        - 'simpson' (Renyi-2 / inverse-participation): pen = c * sum_e (p^O_e)^2.
+          PEAK-weighted (dominated by the large masses), tolerant of structured
+          zeros. Grad (base-2 logits): d pen/d omega_e = 2 c ln2 p_e (p_e - P2),
+          P2 = sum_e p_e^2. This is the divergence whose inverse (1/P2 = effective
+          #branches) cleanly separates the deep cluster from the SGA roots.
+
+        - 'renyi2': pen = c * log2(sum_e p^O_e^2) = -c * H2 (Renyi-2 entropy, bits);
+          scale-invariant version of simpson. Grad = 2 c p_e (p_e - P2)/P2.
+
+        Operates on the EXPANDED per-branch omega [S]; the caller reduces to groups."""
         if not _use_dirichlet or omega_d is None or grad_omega is None:
             return nll, grad_omega
         log_pO = _origination_log_pO(omega_d)          # [S], log2 p^O
         p = torch.exp2(log_pO)                         # [S]
-        pen = -_dir_c * float((_dir_pi * log_pO).sum().item())
-        grad = _dir_c * (p - _dir_pi)                  # [S]
+        if _barrier_kind == "meanlog":
+            pen = -_dir_c * float((_dir_pi * log_pO).sum().item())
+            grad = _dir_c * (p - _dir_pi)              # [S]
+        else:
+            P2 = (p * p).sum()                         # Simpson concentration (scalar)
+            if _barrier_kind == "simpson":
+                pen = _dir_c * float(P2.item())
+                grad = (2.0 * _dir_c * math.log(2.0)) * p * (p - P2)
+            else:  # renyi2
+                pen = _dir_c * float(torch.log2(P2).item())
+                grad = (2.0 * _dir_c) * p * (p - P2) / P2
         return nll + pen, grad_omega + grad
 
     # Precompute ancestors_T for uniform mode
@@ -1044,6 +1072,7 @@ def optimize_theta_wave(
                     origination_root_lambda=origination_root_lambda,
                     origination_dirichlet_c=origination_dirichlet_c,
                     origination_vertical_pi=origination_vertical_pi,
+                    origination_barrier_kind=origination_barrier_kind,
                 )
                 # Merge histories: float32 phase first, then float64 phase
                 result64["history"] = history + result64["history"]

@@ -271,6 +271,92 @@ def omega_group_index_for_species_helpers(species_helpers, tree_path, model_para
     return gi, len(key_to_cat)
 
 
+_AUTO_LABEL = re.compile(r"^Node_.*_\d+$")
+
+# Paper (Huang et al. 2025, DTL_br2) clade set mapped to the Undine_C60 tree labels:
+# each gets its own D,T,L; everything else = a single global baseline. 22 clades
+# (B1Sed10-29 absent from this tree) + baseline = 23 DTL classes ~ the 72-param BIC-best.
+BIGTREE_DTL_CLADES = frozenset({
+    "Halobacteriota", "Thermoplasmatota", "MHH",               # Euryarchaeota
+    "Korarchaeota", "TAC", "Asgard",                            # TACK+Asgard
+    "Micrarchaeota", "Iainarchaeota", "Altarchaeota", "Undinarchaeota",
+    "Aenigmatarchaeota", "PWEA01", "EX4484_52", "Nanohaloarchaeota",
+    "SpSt1190", "Parva_related", "UBA10117", "Pacearchaeota",
+    "Woesearchaeota", "Nanoarchaeota", "DPANN", "Cluster1",     # DPANN + LCAs
+})
+
+
+def _is_named_clade(label: str) -> bool:
+    """A clade-defining label: a non-empty internal name that is not an auto-label."""
+    return bool(label) and _AUTO_LABEL.match(label) is None
+
+
+def tree_clade_group_index(species_helpers, tree_path, S: int | None = None,
+                           clade_whitelist=None):
+    """Topology-only clade-grouped DTL ``group_index[S]`` from a LABELED species tree.
+
+    No AleRax output needed. Each branch is assigned to its SMALLEST ENCLOSING
+    NAMED clade (the paper's per-clade branch-wise DTL_br model); branches above
+    all named clades fall in a 'ROOT' class. This is the constrained channel-1
+    control (clade-wise, NOT free per-branch). Returns (gi[S] long, labels[G]).
+    """
+    import torch
+    if S is None:
+        S = int(species_helpers["S"])
+    leafset_to_label = parse_labeled_newick(tree_path)
+    if clade_whitelist is not None:                  # paper's explicit DTL_br clade set
+        named = [(ls, lbl) for ls, lbl in leafset_to_label.items()
+                 if lbl in clade_whitelist]
+    else:                                            # all named internal clades (>=2 leaves;
+        named = [(ls, lbl) for ls, lbl in leafset_to_label.items()   # excludes leaf accessions)
+                 if _is_named_clade(lbl) and len(ls) >= 2]
+    named.sort(key=lambda kv: len(kv[0]))            # smallest clade first
+    node_leafsets = species_node_leafsets(species_helpers, S)
+    lab_of: List[str] = []
+    for s in range(S):
+        vs = node_leafsets[s]
+        chosen = "ROOT"
+        for ls, lbl in named:                        # first (smallest) enclosing
+            if vs <= ls:
+                chosen = lbl
+                break
+        lab_of.append(chosen)
+    labels = sorted(set(lab_of))
+    lab2id = {l: i for i, l in enumerate(labels)}
+    gi = torch.tensor([lab2id[l] for l in lab_of], dtype=torch.long)
+    return gi, labels
+
+
+def tree_origination_group_index(species_helpers, tree_path, S: int | None = None,
+                                 dpann_label: str = "DPANN"):
+    """Topology-only origination ``omega_group_index[S]`` = {root, 2 root-children,
+    DPANN clade, rest} (the paper's origination class structure). 5 classes:
+    0=root, 1/2=the two root-child branches, 3=DPANN clade, 4=all others.
+    Returns (gi[S] long, n_groups). DPANN class is dropped (folded into rest) if
+    the tree has no 'DPANN' label (e.g. a DPANN-internal rooting)."""
+    import torch
+    from gpurec.core.tree_prior import species_parent_index
+    if S is None:
+        S = int(species_helpers["S"])
+    parent = species_parent_index(species_helpers).tolist()
+    roots = [i for i in range(S) if parent[i] < 0 or parent[i] == i]
+    root = roots[0]
+    children = [i for i in range(S) if parent[i] == root and i != root]
+    leafset_to_label = parse_labeled_newick(tree_path)
+    label_to_leafset = {lbl: ls for ls, lbl in leafset_to_label.items()}
+    dpann_ls = label_to_leafset.get(dpann_label)
+    node_leafsets = species_node_leafsets(species_helpers, S)
+    gi = torch.full((S,), 4, dtype=torch.long)       # rest = 4
+    if dpann_ls is not None:
+        for s in range(S):
+            if node_leafsets[s] <= dpann_ls:
+                gi[s] = 3                            # DPANN clade
+    for ci, c in enumerate(children[:2]):
+        gi[c] = 1 + ci                               # root children = 1, 2
+    gi[root] = 0                                      # root = 0
+    return gi, 5
+
+
 def group_index_for_species_helpers(species_helpers, tree_path, model_params_path,
                                      round_sig: int = 6):
     """Build ``group_index[S]`` (long) + category rate table for a gpurec run.

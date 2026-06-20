@@ -806,6 +806,7 @@ def _run(args, data_dir: Path):
         origination_root_lambda=args.origination_root_lambda,
         origination_dirichlet_c=args.origination_dirichlet,
         origination_vertical_pi=origination_vertical_pi,
+        origination_barrier_kind=args.origination_barrier_kind,
     )
     elapsed = time.time() - t0
 
@@ -1001,11 +1002,17 @@ def _parse_args(argv=None):
                         "which collapses p^O onto the root and kills the tail. "
                         "Only with --origination optimize (free omega). 0 = off.")
     p.add_argument("--origination-dirichlet", type=float, default=0.0,
-                   help="ASYMMETRIC DIRICHLET (vertical) origination prior strength "
-                        "c: penalty c*KL(pi||p^O), pi = root-concentrated vertical "
-                        "profile. Shrinks p^O toward verticality AND forbids the "
-                        "degenerate single-branch vertex (the reroot degeneracy). "
-                        "The principled cure. c tuned by evidence. 0 = off.")
+                   help="ANTI-CONCENTRATION origination barrier strength c. Forbids the "
+                        "degenerate single-branch origination vertex (the reroot "
+                        "degeneracy). The principled cure; c tuned by evidence. 0 = off. "
+                        "Divergence set by --origination-barrier-kind.")
+    p.add_argument("--origination-barrier-kind", type=str, default="meanlog",
+                   choices=["meanlog", "simpson", "renyi2"],
+                   help="Divergence for the anti-concentration barrier. 'meanlog' "
+                        "(reverse KL c*KL(pi||p^O), zero-weighted -- over-penalizes "
+                        "structured p^O); 'simpson' (c*sum p^O^2, PEAK-weighted, "
+                        "tolerates structured zeros -- the corrected barrier); 'renyi2' "
+                        "(c*log2 sum p^O^2, scale-invariant). Default meanlog.")
     p.add_argument("--origination-vertical-rho", type=float, default=0.95,
                    help="Verticality strength of the Dirichlet target pi: "
                         "pi=(1-rho)/S + rho*decay^(-depth)/Z. rho->1 = strongly "

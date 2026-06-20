@@ -214,6 +214,33 @@ def _run(args, data_dir: Path):
 
     # 4. Brownian prior + origination, same conventions as Williams.
     parent_index = species_parent_index(species_helpers).to(device)
+
+    # CLADE-GROUPED DTL + structured origination (constrained channel-1 control;
+    # the paper's per-clade branch-wise DTL_br + {root, 2 children, DPANN} O).
+    group_index = None
+    omega_group_index = None
+    if args.clade_groups_from_tree:
+        from clade_groups import (tree_clade_group_index, tree_origination_group_index,
+                                  BIGTREE_DTL_CLADES)
+        _wl = None if args.all_named_clades else BIGTREE_DTL_CLADES
+        group_index, _cg_labels = tree_clade_group_index(
+            species_helpers, str(tree_path), S, clade_whitelist=_wl)
+        group_index = group_index.to(device)
+        n_dtl = int(group_index.max().item()) + 1
+        n_o = 0
+        if args.origination == "optimize":
+            omega_group_index, n_o = tree_origination_group_index(
+                species_helpers, str(tree_path), S)
+            omega_group_index = omega_group_index.to(device)
+        print(f"      CLADE-GROUPED DTL: {n_dtl} classes from named clades; "
+              f"O: {n_o} classes (root/2-children/DPANN/rest)", flush=True)
+        if args.preflight_groups:
+            import collections
+            print("      DTL clade labels:", _cg_labels)
+            if omega_group_index is not None:
+                print("      O class sizes:", dict(sorted(
+                    collections.Counter(omega_group_index.tolist()).items())))
+            raise SystemExit("--preflight-groups: grouping built OK, exiting before fit")
     brownian_sigma = float(args.brownian_sigma) if args.prior == "brownian" else None
     brownian_root_sigma = args.brownian_root_sigma
     prior_info = {"prior": args.prior}
@@ -267,6 +294,31 @@ def _run(args, data_dir: Path):
               f"(penalize 1-p^O_root; root branch index {origination_root_index})",
               flush=True)
 
+    # ANTI-CONCENTRATION origination barrier (the validated cure). pi target:
+    # rho=0 -> uniform (pure anti-concentration); rho>0 -> root-vertical. Penalty
+    # strength c with divergence --origination-barrier-kind (use 'simpson').
+    origination_vertical_pi = None
+    if args.origination == "optimize" and args.origination_dirichlet > 0:
+        _par = parent_index.tolist()
+        _depth = [0] * S
+        for e in range(S):
+            d, cur, seen = 0, e, 0
+            while _par[cur] >= 0 and _par[cur] != cur and seen <= S:
+                d += 1; cur = _par[cur]; seen += 1
+            _depth[e] = d
+        _dec = float(args.origination_vertical_decay)
+        _rho = float(args.origination_vertical_rho)
+        _v = torch.tensor([_dec ** (-d) for d in _depth], dtype=dtype, device=device)
+        _v = _v / _v.sum()
+        origination_vertical_pi = (1.0 - _rho) / S + _rho * _v          # [S], sum=1, >0
+        origination_info.update({
+            "origination_dirichlet_c": float(args.origination_dirichlet),
+            "origination_barrier_kind": args.origination_barrier_kind,
+            "origination_vertical_rho": _rho})
+        print(f"      O BARRIER: kind={args.origination_barrier_kind} "
+              f"c={args.origination_dirichlet} rho={_rho} "
+              f"(pi_min={float(origination_vertical_pi.min()):.2e})", flush=True)
+
     theta_init = math.log2(args.init_rate) * torch.ones(S, 3, dtype=dtype, device=device)
 
     print(f"[4/5] Optimizing specieswise theta [S={S},3]  "
@@ -301,6 +353,11 @@ def _run(args, data_dir: Path):
         origination_depth_lambda=args.origination_depth_lambda,
         origination_root_index=origination_root_index,
         origination_root_lambda=args.origination_root_lambda,
+        origination_dirichlet_c=args.origination_dirichlet,
+        origination_vertical_pi=origination_vertical_pi,
+        origination_barrier_kind=args.origination_barrier_kind,
+        group_index=group_index,
+        omega_group_index=omega_group_index,
     )
     elapsed = time.time() - t0
 
@@ -409,6 +466,31 @@ def _parse_args(argv=None):
                         "Flat tax on all non-root mass (depth-agnostic) -- rewards "
                         "root origination without taxing the deep tail's shape. Use "
                         "INSTEAD of --origination-depth-lambda. 0=off.")
+    p.add_argument("--origination-dirichlet", type=float, default=0.0,
+                   help="ANTI-CONCENTRATION origination barrier strength c. Forbids the "
+                        "degenerate single-branch origination vertex (reroot degeneracy). "
+                        "0=off. Divergence set by --origination-barrier-kind.")
+    p.add_argument("--origination-barrier-kind", type=str, default="meanlog",
+                   choices=["meanlog", "simpson", "renyi2"],
+                   help="Barrier divergence. 'simpson' (c*sum p^O^2, PEAK-weighted, "
+                        "tolerates structured zeros -- the validated barrier); 'meanlog' "
+                        "(reverse KL, zero-weighted); 'renyi2' (c*log2 sum p^O^2).")
+    p.add_argument("--origination-vertical-rho", type=float, default=0.0,
+                   help="Verticality of the barrier target pi=(1-rho)/S+rho*decay^-depth/Z. "
+                        "0 (default) = uniform target (pure anti-concentration).")
+    p.add_argument("--origination-vertical-decay", type=float, default=2.0,
+                   help="Geometric decay base of the vertical target with depth (rho>0).")
+    p.add_argument("--clade-groups-from-tree", action="store_true",
+                   help="CONSTRAINED channel-1: clade-grouped DTL from the labeled "
+                        "species tree (each branch -> smallest enclosing NAMED clade; "
+                        "the paper's per-clade branch-wise DTL_br) + structured O "
+                        "{root, 2 children, DPANN, rest}. No AleRax output needed.")
+    p.add_argument("--preflight-groups", action="store_true",
+                   help="With --clade-groups-from-tree: build + print the grouping "
+                        "(DTL labels, O class sizes) and exit before fitting.")
+    p.add_argument("--all-named-clades", action="store_true",
+                   help="Use ALL named internal clades (~30) instead of the paper's "
+                        "explicit DTL_br2 whitelist (22). Richer DTL_br model.")
     p.add_argument("--family-batch-size", type=int, default=0,
                    help="mini-batch families for forward/backward to bound GPU "
                         "memory (0=all at once). Use a few hundred for the big tree.")

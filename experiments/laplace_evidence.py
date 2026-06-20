@@ -55,6 +55,11 @@ def main():
     ap.add_argument("--sidecar", required=True)
     ap.add_argument("--data-dir", default=DEFAULT_DATA_DIR)
     ap.add_argument("--tau", type=float, default=1.0)
+    ap.add_argument("--barrier-c", type=float, default=0.0,
+                    help="If >0: add the BARRIER-CONSISTENT Hessian on the omega block "
+                         "(Simpson c*sum p^2 curvature) instead of relying on tau there. "
+                         "Makes the Laplace occam consistent with the fitted barrier.")
+    ap.add_argument("--barrier-kind", default="simpson", choices=["simpson", "renyi2"])
     ap.add_argument("--prior-mu", type=float, default=None)
     ap.add_argument("--fd-eps", type=float, default=1e-3)
     ap.add_argument("--max-full-k", type=int, default=120)
@@ -290,7 +295,29 @@ def main():
             if (j + 1) % 20 == 0:
                 print(f"[hess]   col {j + 1}/{k_eff}", flush=True)
         H_U = 0.5 * (H_U + H_U.t())
-        evH_raw = torch.linalg.eigvalsh(H_U)          # eigenvalues of the data Hessian H
+        # BARRIER-CONSISTENT occam: add the analytic Simpson curvature on the omega
+        # block (last n_op kept coords; omega is never floored), so the O directions
+        # are floored by the FITTED barrier (~c) instead of tau. R=sum_g q_g^2/n_g,
+        # H_R[a,b]=2 ln2^2[(2u_a-q_a R)d_ab - 2u_a q_b - 2q_a u_b + 3 q_a q_b R], u=q^2/n.
+        if args.barrier_c > 0.0 and _opt_orig and n_op > 0:
+            Go = int(omega_group_index.max().item()) + 1
+            n_g = torch.zeros(Go, dtype=dtype, device=device)
+            n_g.index_add_(0, omega_group_index, torch.ones_like(omega_star))
+            l2q = op0 + torch.log2(n_g)
+            qg = torch.exp2(l2q - _lse2(l2q, dim=0))   # MAP group masses, sum=1
+            ug = qg * qg / n_g
+            R = ug.sum()
+            HR = (torch.diag(2.0 * ug - qg * R)
+                  - 2.0 * torch.outer(ug, qg) - 2.0 * torch.outer(qg, ug)
+                  + 3.0 * R * torch.outer(qg, qg))
+            HR = 2.0 * (_LN2 ** 2) * HR
+            if args.barrier_kind == "renyi2":
+                HR = HR / R                            # leading term of d^2(log R)
+            H_barrier = _LN2 * args.barrier_c * HR     # nats
+            H_U[k_eff - n_op:, k_eff - n_op:] += H_barrier
+            print(f"[barrier] +Simpson Hessian on {n_op} omega coords; "
+                  f"max|H_b|={float(H_barrier.abs().max()):.1f} vs tau={tau}", flush=True)
+        evH_raw = torch.linalg.eigvalsh(H_U)          # eigenvalues of the (posterior) Hessian
         # Robust to indefinite/under-converged optima: count only the POSITIVE
         # (well-determined) curvature; flat/negative directions are prior-dominated
         # (contribute log(tau) to logdet, 0 to p_eff). For a true minimum (H PSD)
