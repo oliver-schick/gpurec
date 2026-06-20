@@ -73,16 +73,25 @@ def _compute_dts_cross(Pi, Pibar, meta, sp_child1, sp_child2, log_pD, log_pS,
 # ---------------------------------------------------------------------------
 
 def _compute_Pibar_inline(Pi_W, transfer_mat_T, mt_squeezed, pibar_mode,
-                          ancestors_T=None, topk_k=16, family_ids=None):
+                          ancestors_T=None, topk_k=16, family_ids=None,
+                          recipient_w=None):
     """Compute Pibar for a wave, either via dense matmul or uniform approximation.
 
     Args:
         family_ids: Long[W] wave-local family indices. When provided with a [G, S, S]
             transfer_mat_T, loops over unique families to avoid [W, S, S] allocation.
+        recipient_w: optional [S] recipient receptivity weight (transfer-to model).
+            When given (uniform mode), the recipient sum is w-weighted; mt_squeezed
+            must already carry the per-donor normalization -log2(Sum_{r not anc(d)} w_r)
+            (see ``core/transfer_to.recipient_uniform_setup``). None = current model.
     """
     Pi_max = Pi_W.max(dim=1, keepdim=True).values
     if pibar_mode == 'uniform':
         Pi_exp = torch.exp2(Pi_W - Pi_max)
+        if recipient_w is not None:
+            # transfer-to: scale recipient contributions by w_r BEFORE the
+            # row_sum - ancestor_sum (separable -> O(C*S) preserved).
+            Pi_exp = Pi_exp * recipient_w
         row_sum = Pi_exp.sum(dim=1, keepdim=True)
         # Sparse COO matmul returns non-contiguous output for 2D input — make
         # it contiguous before the subtraction so row_sum - ancestor_sum is exact.

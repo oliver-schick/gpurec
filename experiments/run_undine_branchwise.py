@@ -234,6 +234,39 @@ def _run(args, data_dir: Path):
             "regularization": ("l2" if origination_l2 > 0 else "free"),
             "origination_l2": origination_l2})
 
+    # Vertical-evolution origination prior: per-branch DEPTH = #edges from the
+    # root (root=0); penalize below-root origination via --origination-depth-lambda.
+    origination_depth = None
+    if args.origination == "optimize" and args.origination_depth_lambda > 0:
+        _par = parent_index.tolist()
+        depth = [0] * S
+        for e in range(S):
+            d, cur, seen = 0, e, 0
+            while _par[cur] >= 0 and seen <= S:
+                d += 1; cur = _par[cur]; seen += 1
+            depth[e] = d
+        origination_depth = torch.tensor(depth, dtype=dtype, device=device)
+        origination_info.update({
+            "origination_depth_lambda": float(args.origination_depth_lambda),
+            "depth_range": [min(depth), max(depth)]})
+        print(f"      VERTICAL-EVOLUTION O prior: lambda={args.origination_depth_lambda} "
+              f"(depth range {min(depth)}..{max(depth)})", flush=True)
+
+    # Root branch index (parent<0 or self-loop) for the ROOT-MASS origination prior.
+    origination_root_index = None
+    if args.origination == "optimize" and args.origination_root_lambda > 0:
+        _par = parent_index.tolist()
+        _roots = [e for e in range(S) if _par[e] < 0 or _par[e] == e]
+        if len(_roots) != 1:
+            raise SystemExit(f"expected exactly 1 root branch, got {_roots}")
+        origination_root_index = _roots[0]
+        origination_info.update({
+            "origination_root_lambda": float(args.origination_root_lambda),
+            "origination_root_index": origination_root_index})
+        print(f"      ROOT-MASS O prior: lambda={args.origination_root_lambda} "
+              f"(penalize 1-p^O_root; root branch index {origination_root_index})",
+              flush=True)
+
     theta_init = math.log2(args.init_rate) * torch.ones(S, 3, dtype=dtype, device=device)
 
     print(f"[4/5] Optimizing specieswise theta [S={S},3]  "
@@ -264,6 +297,10 @@ def _run(args, data_dir: Path):
         origination=args.origination,
         omega_init=omega_init,
         origination_l2=origination_l2,
+        origination_depth=origination_depth,
+        origination_depth_lambda=args.origination_depth_lambda,
+        origination_root_index=origination_root_index,
+        origination_root_lambda=args.origination_root_lambda,
     )
     elapsed = time.time() - t0
 
@@ -362,6 +399,16 @@ def _parse_args(argv=None):
                    help="L2/ridge on origination logits (lambda*sum(omega^2), "
                         "shrink p^O toward uniform). 0=free. p^O is a softmax "
                         "distribution, so L2 is correct (not a Brownian prior).")
+    p.add_argument("--origination-depth-lambda", type=float, default=0.0,
+                   help="VERTICAL-EVOLUTION origination prior: penalty "
+                        "lambda*E_{p^O}[depth] where depth=#edges below the root "
+                        "(root=0). Pulls origination mass to the root, taxing the "
+                        "below-root loss-saving (small-genome) artefact. 0=off.")
+    p.add_argument("--origination-root-lambda", type=float, default=0.0,
+                   help="ROOT-MASS origination prior: penalty lambda*(1 - p^O_root). "
+                        "Flat tax on all non-root mass (depth-agnostic) -- rewards "
+                        "root origination without taxing the deep tail's shape. Use "
+                        "INSTEAD of --origination-depth-lambda. 0=off.")
     p.add_argument("--family-batch-size", type=int, default=0,
                    help="mini-batch families for forward/backward to bound GPU "
                         "memory (0=all at once). Use a few hundred for the big tree.")

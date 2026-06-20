@@ -18,7 +18,7 @@ NEG_INF = float("-inf")
 # =========================================================================
 
 def E_step(E, sp_P_idx, sp_child12_idx, log_pS, log_pD, log_pL, transfer_mat, max_transfer_mat, pibar_mode='dense',
-           ancestors_T=None, leaf_E=None):
+           ancestors_T=None, leaf_E=None, recipient_w=None):
     """E can either have shape [S] or [N_genes, S]. Likewise, transfer_mat can have shape [S, S] or [N_genes, S, S].
 
     ``leaf_E`` (optional, shape [S]) is the per-species leaf extinction boundary
@@ -74,6 +74,9 @@ def E_step(E, sp_P_idx, sp_child12_idx, log_pS, log_pD, log_pL, transfer_mat, ma
         max_E = E.max(dim=-1, keepdim=True).values
         expE = torch.exp2(E - max_E)                     # [S] or [N, S]
         expE_2d = expE.unsqueeze(0) if expE.ndim == 1 else expE
+        if recipient_w is not None:
+            # transfer-to: weight the TL-lost recipient sum by w_r (separable).
+            expE_2d = expE_2d * recipient_w
         row_sum = expE_2d.sum(dim=-1, keepdim=True)      # [1, 1] or [N, 1]
         # Sparse COO matmul returns a column-major (non-contiguous) result when LHS
         # is 2D (batched case). Make it contiguous before subsequent arithmetic so

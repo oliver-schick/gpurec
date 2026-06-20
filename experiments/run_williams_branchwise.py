@@ -497,6 +497,8 @@ def _run(args, data_dir: Path):
     # Optional: CLADE-GROUPED ("branch wise") model from AleRax's output.
     group_index = None
     omega_group_index = None
+    _alerax_theta_init = None
+    _alerax_omega_init = None
     group_info = {"clade_groups": None}
     if args.clade_groups:
         from clade_groups import group_index_for_species_helpers
@@ -537,6 +539,22 @@ def _run(args, data_dir: Path):
                 group_info["n_origination_groups"] = n_o_groups
                 print(f"      GROUPED ORIGINATION: {n_o_groups} O categories",
                       flush=True)
+
+        # Optional: seed the optimizer AT AleRax's fitted per-branch rates (instead
+        # of uniform) -> tests whether gpurec stays in AleRax's spread-O basin or
+        # still walks to the degenerate-O corner (faithful constrained-ML diagnostic).
+        if args.init_from_alerax:
+            from clade_groups import branch_params_from_alerax
+            _rb, _ob, _ = branch_params_from_alerax(
+                species_helpers, str(cg_tree), str(cg_mp))
+            _alerax_theta_init = torch.log2(_rb.clamp_min(1e-10)).to(
+                device=device, dtype=dtype)               # [S,3]
+            if _ob is not None:
+                _alerax_omega_init = torch.log2(_ob.clamp_min(1e-12)).to(
+                    device=device, dtype=dtype)           # [S]
+            group_info["init_from_alerax"] = True
+            print("      INIT-FROM-ALERAX: theta(+omega) seeded at AleRax fitted rates",
+                  flush=True)
 
     # 2. Load families.
     print(f"[2/5] Parsing {len(ale_paths)} .ale families "
@@ -624,6 +642,8 @@ def _run(args, data_dir: Path):
     # 5. Optimize (specieswise -> [S,3] branch-wise rates).
     init_log2 = math.log2(args.init_rate)
     theta_init = init_log2 * torch.ones(S, 3, dtype=dtype, device=device)
+    if _alerax_theta_init is not None:
+        theta_init = _alerax_theta_init.clone()           # AleRax-seeded init
 
     # --- Brownian (TKP) rate prior + AleRax-style box bounds ----------------
     from gpurec.core.tree_prior import species_parent_index
@@ -644,6 +664,42 @@ def _run(args, data_dir: Path):
         origination_depth = torch.tensor(depth, dtype=dtype, device=device)
         print(f"      VERTICAL-EVOLUTION O prior: lambda={args.origination_depth_lambda} "
               f"(depth range {min(depth)}..{max(depth)})", flush=True)
+
+    # Root branch index (parent<0 or self-loop) for the ROOT-MASS origination prior.
+    origination_root_index = None
+    if args.origination == "optimize" and args.origination_root_lambda > 0:
+        _par = parent_index.tolist()
+        _roots = [e for e in range(S) if _par[e] < 0 or _par[e] == e]
+        if len(_roots) != 1:
+            raise SystemExit(f"expected exactly 1 root branch, got {_roots}")
+        origination_root_index = _roots[0]
+        print(f"      ROOT-MASS O prior: lambda={args.origination_root_lambda} "
+              f"(penalize 1-p^O_root; root branch index {origination_root_index})",
+              flush=True)
+
+    # ASYMMETRIC DIRICHLET (vertical-evolution) origination prior. Shrink p^O toward
+    # a root-concentrated profile pi (strong biological verticality) while forbidding
+    # the degenerate vertex. pi_e = (1-rho)/S + rho * decay^(-depth_e)/Z : strictly
+    # positive (uniform floor -> anti-degeneracy barrier everywhere), root-peaked,
+    # geometric decay with depth. Penalty = c * KL(pi||p^O); c tuned by evidence.
+    origination_vertical_pi = None
+    if args.origination == "optimize" and args.origination_dirichlet > 0:
+        _par = parent_index.tolist()
+        _depth = [0] * S
+        for e in range(S):
+            d, cur, seen = 0, e, 0
+            while _par[cur] >= 0 and seen <= S:
+                d += 1; cur = _par[cur]; seen += 1
+            _depth[e] = d
+        _dec = float(args.origination_vertical_decay)
+        _rho = float(args.origination_vertical_rho)
+        _v = torch.tensor([_dec ** (-d) for d in _depth], dtype=dtype, device=device)
+        _v = _v / _v.sum()
+        origination_vertical_pi = (1.0 - _rho) / S + _rho * _v          # [S], sum=1, >0
+        print(f"      DIRICHLET vertical O prior: c={args.origination_dirichlet} "
+              f"rho={_rho} decay={_dec} (pi_root={float(origination_vertical_pi.max()):.4f}, "
+              f"pi_min={float(origination_vertical_pi.min()):.2e}, depth 0..{max(_depth)})",
+              flush=True)
 
     prior_info = {"prior": args.prior}
     brownian_sigma = None
@@ -684,6 +740,8 @@ def _run(args, data_dir: Path):
     origination_l2 = 0.0
     if args.origination == "optimize":
         omega_init = torch.zeros(S, dtype=dtype, device=device)  # uniform init
+        if _alerax_omega_init is not None:
+            omega_init = _alerax_omega_init.clone()       # AleRax-seeded omega
         # p^O_e = softmax(omega) is a probability distribution (sum=1), so the
         # appropriate regularizer is L2/ridge on the logits (shrink toward
         # uniform), NOT a tree-structured Brownian prior. 0 -> free omega.
@@ -744,6 +802,10 @@ def _run(args, data_dir: Path):
         omega_group_index=omega_group_index,
         origination_depth=origination_depth,
         origination_depth_lambda=args.origination_depth_lambda,
+        origination_root_index=origination_root_index,
+        origination_root_lambda=args.origination_root_lambda,
+        origination_dirichlet_c=args.origination_dirichlet,
+        origination_vertical_pi=origination_vertical_pi,
     )
     elapsed = time.time() - t0
 
@@ -929,6 +991,29 @@ def _parse_args(argv=None):
                         "loss-saving concentration the small-genome artefact "
                         "exploits. Only with --origination optimize (free omega). "
                         "0 = off. Selected by evidence (empirical Bayes).")
+    p.add_argument("--origination-root-lambda", type=float, default=0.0,
+                   help="ROOT-MASS origination prior strength: penalize "
+                        "lambda * (1 - p^O_root). A FLAT tax on all non-root "
+                        "origination mass (depth-agnostic), rewarding root "
+                        "origination (the vertical signal) WITHOUT taxing the "
+                        "depth-distribution of the rest (so AleRax's deep tail is "
+                        "left free). Use INSTEAD of --origination-depth-lambda, "
+                        "which collapses p^O onto the root and kills the tail. "
+                        "Only with --origination optimize (free omega). 0 = off.")
+    p.add_argument("--origination-dirichlet", type=float, default=0.0,
+                   help="ASYMMETRIC DIRICHLET (vertical) origination prior strength "
+                        "c: penalty c*KL(pi||p^O), pi = root-concentrated vertical "
+                        "profile. Shrinks p^O toward verticality AND forbids the "
+                        "degenerate single-branch vertex (the reroot degeneracy). "
+                        "The principled cure. c tuned by evidence. 0 = off.")
+    p.add_argument("--origination-vertical-rho", type=float, default=0.95,
+                   help="Verticality strength of the Dirichlet target pi: "
+                        "pi=(1-rho)/S + rho*decay^(-depth)/Z. rho->1 = strongly "
+                        "root-concentrated; the (1-rho)/S floor keeps pi>0 (the "
+                        "anti-degeneracy barrier). Default 0.95 (strong bio prior).")
+    p.add_argument("--origination-vertical-decay", type=float, default=2.0,
+                   help="Geometric decay base of the vertical profile with depth "
+                        "(pi_e ~ decay^(-depth_e)). Default 2.0 (halve per edge).")
     p.add_argument("--family-batch-size", type=int, default=0,
                    help="Process families in mini-batches of this size for the "
                         "forward/backward (gradient accumulated across batches), "
@@ -948,6 +1033,12 @@ def _parse_args(argv=None):
                         "by descendant leaf set), and gpurec optimizes G grouped "
                         "rate rows instead of S free per-branch rates. Forces "
                         "specieswise + prior none. Default: None (free per-branch).")
+    p.add_argument("--init-from-alerax", action="store_true",
+                   help="With --clade-groups: seed theta (and omega, if optimizing "
+                        "origination) AT AleRax's fitted per-branch rates instead of "
+                        "the uniform init. Faithful constrained-ML diagnostic: does "
+                        "gpurec stay in AleRax's spread-O basin or walk to the "
+                        "degenerate-O corner?")
     p.add_argument("--dtype", default="float64", choices=["float32", "float64"],
                    help="Precision (default: float64)")
     p.add_argument("--out", default=None,

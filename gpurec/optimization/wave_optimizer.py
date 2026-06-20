@@ -98,6 +98,10 @@ def optimize_theta_wave(
     omega_group_index: torch.Tensor | None = None,
     origination_depth: torch.Tensor | None = None,
     origination_depth_lambda: float = 0.0,
+    origination_root_index: int | None = None,
+    origination_root_lambda: float = 0.0,
+    origination_dirichlet_c: float = 0.0,
+    origination_vertical_pi: torch.Tensor | None = None,
 ):
     """Optimize theta using wave forward/backward + implicit gradient.
 
@@ -387,6 +391,47 @@ def optimize_theta_wave(
             raise ValueError(
                 f"origination_depth must have S={_S_branches} entries, got {_depth.numel()}")
 
+    # ROOT-MASS origination prior: penalize (1 - p^O_root), a FLAT tax on all
+    # non-root origination mass (depth-agnostic), unlike the progressive depth
+    # prior which taxes deep mass ever harder and collapses p^O onto the root.
+    # This rewards SOME root origination (the vertical signal) while leaving the
+    # shape of the remaining mass (e.g. AleRax's deep tail) free. pen = lambda *
+    # (1 - p^O_root); grad (base-2 softmax) = lambda * ln2 * p_root * (p_e - 1{e=root}).
+    _root_idx = None
+    _root_lambda = float(origination_root_lambda) if _opt_origination else 0.0
+    _use_root = (origination_root_index is not None) and _root_lambda > 0.0
+    if _use_root:
+        if _use_omega_groups:
+            raise ValueError(
+                "origination_root prior is for FREE per-branch omega; not "
+                "compatible with omega_group_index (grouped origination).")
+        _root_idx = int(origination_root_index)
+        if not (0 <= _root_idx < _S_branches):
+            raise ValueError(
+                f"origination_root_index={_root_idx} out of range [0,{_S_branches})")
+
+    # ASYMMETRIC DIRICHLET (vertical-evolution) prior on the origination
+    # distribution p^O. Penalty = c * KL(pi || p^O) (up to a const) = -c * sum_e
+    # pi_e log2 p^O_e, i.e. the Dirichlet(alpha_e = 1 + c*pi_e) log-density. pi is
+    # the per-branch VERTICAL profile (root-concentrated, sum=1, strictly > 0): it
+    # (i) shrinks p^O toward root-concentrated origination (strong biological prior),
+    # and (ii) FORBIDS the degenerate vertex (KL -> inf as any p^O_e -> 0 where
+    # pi_e > 0). Grad (base-2 logits) = c * (p^O_e - pi_e). Per-branch, applied
+    # BEFORE the omega-group reduction, so it composes with grouped origination.
+    _dir_c = float(origination_dirichlet_c) if _opt_origination else 0.0
+    _dir_pi = None
+    _use_dirichlet = (origination_vertical_pi is not None) and _dir_c > 0.0
+    if _use_dirichlet:
+        _dir_pi = origination_vertical_pi.to(device=device, dtype=dtype).reshape(-1)
+        if _dir_pi.numel() != _S_branches:
+            raise ValueError(
+                f"origination_vertical_pi must have S={_S_branches} entries, "
+                f"got {_dir_pi.numel()}")
+        if float(_dir_pi.min().item()) <= 0.0:
+            raise ValueError("origination_vertical_pi must be strictly positive "
+                             "(else the anti-degeneracy barrier vanishes there)")
+        _dir_pi = _dir_pi / _dir_pi.sum()                 # normalize to a distribution
+
     _brownian_prior = None
     _prior_parent_index = None
     _prior_sigma = None
@@ -444,6 +489,35 @@ def optimize_theta_wave(
         Ed = (p * _depth).sum()
         pen = _depth_lambda * float(Ed.item())
         grad = (_depth_lambda * math.log(2.0)) * p * (_depth - Ed)
+        return nll + pen, grad_omega + grad
+
+    def _apply_origination_root(omega_d, nll, grad_omega):
+        """Root-mass prior: penalize (1 - p^O_root). pen = lambda*(1 - p_root);
+        grad (base-2 softmax) = lambda * ln2 * p_root * (p_e - 1{e=root}). Rewards
+        root origination without taxing the depth-distribution of the rest."""
+        if not _use_root or omega_d is None or grad_omega is None:
+            return nll, grad_omega
+        log_pO = _origination_log_pO(omega_d)          # [S]
+        p = torch.exp2(log_pO)                         # [S] p^O
+        p_root = p[_root_idx]
+        pen = _root_lambda * float((1.0 - p_root).item())
+        scale = _root_lambda * math.log(2.0) * p_root  # 0-dim tensor
+        grad = scale * p                               # [S]
+        grad[_root_idx] = grad[_root_idx] - scale
+        return nll + pen, grad_omega + grad
+
+    def _apply_origination_dirichlet(omega_d, nll, grad_omega):
+        """Asymmetric Dirichlet (vertical) prior: penalty = -c * sum_e pi_e log2 p^O_e
+        (= Dirichlet(1 + c*pi) log-density, up to const = c*KL(pi||p^O)). Pulls p^O
+        toward the root-concentrated profile pi and forbids the degenerate vertex.
+        Grad in base-2 logit space: d penalty / d omega_e = c (p^O_e - pi_e). Operates
+        on the EXPANDED per-branch omega [S]; the caller reduces to groups afterwards."""
+        if not _use_dirichlet or omega_d is None or grad_omega is None:
+            return nll, grad_omega
+        log_pO = _origination_log_pO(omega_d)          # [S], log2 p^O
+        p = torch.exp2(log_pO)                         # [S]
+        pen = -_dir_c * float((_dir_pi * log_pO).sum().item())
+        grad = _dir_c * (p - _dir_pi)                  # [S]
         return nll + pen, grad_omega + grad
 
     # Precompute ancestors_T for uniform mode
@@ -805,6 +879,9 @@ def optimize_theta_wave(
                 nll, grad_theta, statsG, E_out, grad_omega = _forward_backward(
                     theta_d, warm_E_ref[0], omega_d=omega_d,
                 )
+                # Asymmetric Dirichlet (vertical) prior acts on per-branch p^O,
+                # BEFORE the group reduction (so it composes with grouped omega).
+                nll, grad_omega = _apply_origination_dirichlet(omega_d, nll, grad_omega)
                 # Reduce the per-branch omega grad to per-category (chain rule).
                 grad_omega = _reduce_omega(grad_omega)
             else:
@@ -814,6 +891,7 @@ def optimize_theta_wave(
             # L2 ridge on the (possibly grouped) origination logits.
             nll, grad_omega = _apply_origination_prior(omega_param, nll, grad_omega)
             nll, grad_omega = _apply_origination_depth(omega_param, nll, grad_omega)
+            nll, grad_omega = _apply_origination_root(omega_param, nll, grad_omega)
             # Reduce the per-branch [S,3] gradient to per-group [G,3] (chain rule
             # of the expand map); no-op when ungrouped.
             grad_param = _reduce_grad(grad_theta)
@@ -962,6 +1040,10 @@ def optimize_theta_wave(
                     omega_group_index=omega_group_index,
                     origination_depth=origination_depth,
                     origination_depth_lambda=origination_depth_lambda,
+                    origination_root_index=origination_root_index,
+                    origination_root_lambda=origination_root_lambda,
+                    origination_dirichlet_c=origination_dirichlet_c,
+                    origination_vertical_pi=origination_vertical_pi,
                 )
                 # Merge histories: float32 phase first, then float64 phase
                 result64["history"] = history + result64["history"]
