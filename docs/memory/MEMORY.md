@@ -1,0 +1,16 @@
+# Memory index
+
+- [Saion master how-to](reference-saion-howto.md) — connect, deploy, partitions, .feather gotcha, fan-out arrays, preemption; the operational hub for OIST Saion compute.
+- [Saion GPU partitions](reference-saion-gpu-partition.md) — largegpu A100-80GB vs the MIXED gpu partition (V100 usable, P100 useless); pin :v100:, caps are per-partition.
+- [Saion deploy loop (gpurec)](reference-saion-deploy-loop.md) — commit+push from /Users/ssolo/GALE, `reset --hard origin/cpp-rust-free` heal (not git pull), squeue before sbatch.
+- [SLURM 12h x 8 GPU wall limit](feedback-slurm-wall.md) — every slurm/*.sbatch needs --time <= 12:00:00; trainers must be resumable across re-submits.
+- [SLURM module load python/3.11.11](feedback-slurm-module-python.md) — admin says system python may vanish on OS upgrade; load the module in every wrapper.
+- [Saion reconciliation dataset](reference-saion-reconciliation-data.md) — Williams 2017 + This_study gene families in the 4.2 GB 3_Reconciliation.tar.gz (.ale/.ufboot/.faa); only Williams trees extracted so far.
+- [Williams branch-wise replication (active task)](project-williams-branchwise-replication.md) — replicate AleRax per-branch DTL rates with gpurec specieswise mode + fraction-missing; data paths + the GPU-path implementation gap (fraction-missing only on legacy CPU path).
+- [Undine big-tree rooting (active task)](project-undine-bigtree-rooting.md) — "the big tree" = This_study/Undine C60 (~257 taxa, 15 roots, ~7059 ufboot families, AleRax ref); rooting test after Williams; needs a tree/ufboot-input driver (no pre-built .ale).
+- [Williams rooting SOLVED: origination](project-williams-rooting-origination.md) — the gpurec-vs-AleRax Eury/Cluster2 discrepancy is a missing model term (origination O), not a bug; at AleRax's fixed DTL+O rates gpurec recovers the {Eury,TackA,DPANN} top-3.
+- [Local Mac gpurec execution](reference-local-mac-gpurec.md) — what runs on the M4 Max (Triton-free C++ preprocessing + topology/sidecar analysis) vs needs Saion GPU; the darwin -fopenmp build fix.
+- [Rooting two-channel design](project-rooting-two-channel-design.md) — the rooting bias = TWO over-fitting channels (loss/SGA + origination degeneracy); principled cure = constrained DTL + anti-concentration origination barrier + EVIDENCE arbiter + empirical-Bayes; answer is a root REGION; AleRax's Eury is early-stopping-fragile.
+- [Huang archaea rooting paper](reference-huang-archaea-rooting-paper.md) — bioRxiv 2025.11.11.687807 (Szollosi coauthor); AleRax DTLO specs: DTL_br2 72-param BIC-best, origination {root,2 children,DPANN}, Eury root REGION by AU test, SGA artifact documented.
+- [gpurec reconciliation sampler](project-gpurec-recon-sampler.md) — gpurec/core/sampler.py CPU backtrack (DL/TL-lost = unrecorded self-loops); families-at-root = origination-at-root (audited); experiments/families_at_root.py = LACA genome-size readout; uml_rec writers TODO.
+- [gpurec transfer-to (recipient)](project-gpurec-transfer-to.md) — recipient weight w_r is SEPARABLE → O(C·S) preserved (scale Π by w before row_sum−ancestor_sum); gpurec/core/transfer_to.py validated; engine/Triton/backward integration partial; shortcut = set transfer_mat_unnormalized=ω-broadcast for dense autograd fit.
