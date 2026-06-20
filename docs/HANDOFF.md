@@ -1,5 +1,26 @@
 # Session handoff — gpurec archaeal rooting (2026-06-20)
 
+## ⚡ LATEST UPDATE (offline handoff, ~13:30 JST) — READ THIS FIRST
+- **Cluster access without VPN:** `ssh -J oist saion …` and `scp -o "ProxyJump oist" …`
+  go through the `login.oist.jp` bastion (host `oist`). Direct `ssh saion` needs the VPN.
+- **EBev lock-in (4636789): ~18/40.** c=10 done, c=100 nearly, **c=1000/3000 just starting**
+  (array tasks 20–39, ~1–2 h left). It continues on the cluster while I'm offline.
+- **When EBev finishes, run BOTH aggregators** (in `…/williams_run`):
+  - `python3 agg_eb.py` — the τ-ridge evidence ranking. **CAVEAT: this prefers WEAK c**
+    (it rewards data fit, ignores origination concentration) → would under-suppress.
+    Partial c=10 result: DPANN #1; deep cluster {DPANN,TackA,Eury}+SGA in a ~160-nat top
+    group; Asgard/Kor/TAC/Halo demoted ~430–1390 nats.
+  - `python3 agg_eb_barrier.py` — **the FIXED, barrier-consistent ranking** (use this one).
+    `log Z = data_logL_ln + ln2·c·mean(log2 p^O*) [Dirichlet barrier log-prior] + occam(EBev)`
+    on the cmlD0 c∈{1000,3000} MAPs — penalizes concentrated p^O*, no new GPU runs.
+  - **Pass = the barrier-consistent EB picks strong c and floats {Eury,DPANN,TackA,Halo}**
+    (point-MLE at c=3000 already = Eury #1).
+- **Transfer-to fit (`experiments/fit_transfer_to.py`) OOMs on V100** even at 100 families
+  (autograd-unroll of the legacy fixed points is memory-heavy). To run it: use **A100**, a
+  **small `--families`** (≤~300), and/or add `torch.utils.checkpoint` on the Pi/E fixed-point
+  loops (or `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`). It is *functionally correct*
+  (donor vs transfer-to, fits recipient ω via autograd) — just memory-bound.
+
 You're continuing work on **gpurec** (GPU DTL reconciliation, replicating AleRax) for
 **archaeal root inference**. The auto-loaded memories have the deep context; read
 especially `project-rooting-two-channel-design`, `reference-huang-archaea-rooting-paper`,
