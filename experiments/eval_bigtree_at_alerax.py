@@ -67,7 +67,6 @@ def eval_root(model, root, device, dtype, fm_mode):
         log_pO = torch.log2(o / o.sum())
 
     fams, names = _load_families_named(ALE, s2i, min_species=1, dtype=dtype)
-    wl, rc = _build_wave_layout(fams, device, dtype)
     sp_gpu, anc = _sp_helpers_for_uniform(sp, device, dtype)
     urm = torch.log2(sp["Recipients_mat"]).max(dim=-1).values.to(device=device, dtype=dtype)
 
@@ -80,26 +79,34 @@ def eval_root(model, root, device, dtype, fm_mode):
     leaf_obs_log = leaf_E if fm_mode == "both" else None
 
     lp = extract_parameters_uniform(theta, urm, specieswise=True)
+    # E is family-INDEPENDENT -> compute once and reuse across family batches.
     E = E_fixed_point(species_helpers=sp_gpu, log_pS=lp[0], log_pD=lp[1], log_pL=lp[2],
                       transfer_mat=lp[3], max_transfer_mat=lp[4], max_iters=4000,
                       tolerance=1e-10, warm_start_E=None, dtype=dtype, device=device,
                       pibar_mode="uniform", ancestors_T=anc, leaf_E=leaf_E)
-    Pi = Pi_wave_forward(wave_layout=wl, species_helpers=sp_gpu, E=E["E"], Ebar=E["E_bar"],
-                         E_s1=E["E_s1"], E_s2=E["E_s2"], log_pS=lp[0], log_pD=lp[1],
-                         log_pL=lp[2], transfer_mat=lp[3], max_transfer_mat=lp[4],
-                         device=device, dtype=dtype, pibar_mode="uniform",
-                         leaf_obs_log=leaf_obs_log)
-    nll = compute_log_likelihood(Pi["Pi"], E["E"], rc, log_pO=log_pO)
-    per = [float(-v) * _LN2 for v in nll.detach().cpu().tolist()]
+    # BATCH the forward over families: one giant wave layout for all 7059 families at
+    # S=513 overflows the wave kernels (illegal memory access); BTroot used batch 500.
+    CHUNK = 500
+    per = []
+    for i in range(0, len(fams), CHUNK):
+        chunk = fams[i:i + CHUNK]
+        wl, rc = _build_wave_layout(chunk, device, dtype)
+        Pi = Pi_wave_forward(wave_layout=wl, species_helpers=sp_gpu, E=E["E"], Ebar=E["E_bar"],
+                             E_s1=E["E_s1"], E_s2=E["E_s2"], log_pS=lp[0], log_pD=lp[1],
+                             log_pL=lp[2], transfer_mat=lp[3], max_transfer_mat=lp[4],
+                             device=device, dtype=dtype, pibar_mode="uniform",
+                             leaf_obs_log=leaf_obs_log)
+        nll = compute_log_likelihood(Pi["Pi"], E["E"], rc, log_pO=log_pO)
+        per.extend([float(-v) * _LN2 for v in nll.detach().cpu().tolist()])
     n_groups = len({tuple(r.tolist()) for r in rate_branch})
     return names, per, n_groups
 
 
-def au_rank(per_by_root):
+def au_rank(per_by_root, roots):
     common = sorted(set.intersection(*[set(d) for d in per_by_root.values()]))
-    n, R = len(common), len(ROOTS)
+    n, R = len(common), len(roots)
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    L = torch.tensor([[per_by_root[r][f] for r in ROOTS] for f in common], device=dev)
+    L = torch.tensor([[per_by_root[r][f] for r in roots] for f in common], device=dev)
     tot = L.sum(0)
     gammas = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4]; B = 20000
     from torch.distributions import Multinomial
@@ -120,7 +127,7 @@ def au_rank(per_by_root):
         X = torch.stack([1 / sig, sig], 1)
         beta = torch.linalg.lstsq((X * sw.unsqueeze(1)), (z * sw)).solution
         au = 0.0 if float(BP[:, r].max()) == 0.0 else float(1 - Phi(beta[0] - beta[1]))
-        res.append((ROOTS[r], float(tot[r]), float(BP[5, r]), au))
+        res.append((roots[r], float(tot[r]), float(BP[5, r]), au))
     res.sort(key=lambda x: -x[1])
     return res, n
 
@@ -137,12 +144,22 @@ def main():
 
     per_by_root = {}
     for r in ROOTS:
-        names, per, ng = eval_root(args.model, r, device, dtype, args.fm_mode)
+        try:
+            names, per, ng = eval_root(args.model, r, device, dtype, args.fm_mode)
+        except Exception as e:
+            print(f"[FAIL] {args.model} {r:16s}: {type(e).__name__}: {e}", flush=True)
+            continue
         per_by_root[r] = dict(zip(names, per))
         print(f"[done] {args.model} {r:16s} total={sum(per):14.1f}  F={len(per)}  G={ng}",
               flush=True)
+    roots = [r for r in ROOTS if r in per_by_root]
+    if len(roots) < len(ROOTS):
+        print(f"[warn] only {len(roots)}/{len(ROOTS)} roots evaluated; "
+              f"AU over the available subset", flush=True)
+    if len(roots) < 2:
+        raise SystemExit("too few roots succeeded for AU")
 
-    res, n = au_rank(per_by_root)
+    res, n = au_rank(per_by_root, roots)
     b0 = res[0][1]
     print(f"\n=== gpurec @ AleRax {args.model} rates -> AU  (n={n} fam, 15 roots) ===")
     print(f"{'root':16s} {'totalLogL':>13s} {'dTot':>9s} {'BP':>6s} {'AU':>7s}  verdict")
@@ -154,7 +171,7 @@ def main():
         Path(args.out).write_text(json.dumps(
             {"model": args.model, "fm_mode": args.fm_mode,
              "au": [{"root": nm, "total": t, "BP": bp, "AU": au} for nm, t, bp, au in res],
-             "per_family": {r: per_by_root[r] for r in ROOTS}}))
+             "per_family": per_by_root}))
         print(f"\nwrote {args.out}")
     return 0
 
