@@ -327,34 +327,47 @@ def tree_clade_group_index(species_helpers, tree_path, S: int | None = None,
     return gi, labels
 
 
+# Origination clade classes mirroring AleRax's DTL_br1_O on the big tree: DPANN /
+# Eury / TACK+Asgard each own an origination rate; everything else shares a single
+# baseline (4 classes). These are ROOT-INDEPENDENT major clades, so the same O
+# structure transfers across all candidate roots and CARRIES THE ROOTING SIGNAL.
+# (The earlier {root, 2 children, DPANN} structure is the paper's spec for ancestral
+# reconstruction at a FIXED best root; for ROOTING it leaves the rooting-relevant
+# Eury and TACK+Asgard LCAs lumped in the undifferentiated 'rest' class -> O flattens
+# to uniform -> SGA artifact. cf. omega_group_index_for_species_helpers, which reads
+# exactly this {DPANN, Eury, TackA, rest} grouping off AleRax's Williams O column.)
+BIGTREE_ORIGINATION_CLADES = ("Eury", "TackA", "DPANN")
+
+
 def tree_origination_group_index(species_helpers, tree_path, S: int | None = None,
-                                 dpann_label: str = "DPANN"):
-    """Topology-only origination ``omega_group_index[S]`` = {root, 2 root-children,
-    DPANN clade, rest} (the paper's origination class structure). 5 classes:
-    0=root, 1/2=the two root-child branches, 3=DPANN clade, 4=all others.
-    Returns (gi[S] long, n_groups). DPANN class is dropped (folded into rest) if
-    the tree has no 'DPANN' label (e.g. a DPANN-internal rooting)."""
+                                 clade_labels=BIGTREE_ORIGINATION_CLADES):
+    """Topology-only origination ``omega_group_index[S]``: each branch -> the SMALLEST
+    enclosing major-clade in ``clade_labels`` (DPANN / Eury / TACK+Asgard by default),
+    else a shared 'rest' baseline. Mirrors AleRax's DTL_br1_O origination structure
+    (DPANN/Eury/TackA each own O). Returns (gi[S] long, n_groups). Absent labels (e.g.
+    a clade-internal rooting that breaks a clade's monophyly) are skipped -> folded
+    into 'rest'."""
     import torch
-    from gpurec.core.tree_prior import species_parent_index
     if S is None:
         S = int(species_helpers["S"])
-    parent = species_parent_index(species_helpers).tolist()
-    roots = [i for i in range(S) if parent[i] < 0 or parent[i] == i]
-    root = roots[0]
-    children = [i for i in range(S) if parent[i] == root and i != root]
     leafset_to_label = parse_labeled_newick(tree_path)
     label_to_leafset = {lbl: ls for ls, lbl in leafset_to_label.items()}
-    dpann_ls = label_to_leafset.get(dpann_label)
+    named = [(label_to_leafset[l], l) for l in clade_labels if l in label_to_leafset]
+    named.sort(key=lambda kv: len(kv[0]))            # smallest clade first
     node_leafsets = species_node_leafsets(species_helpers, S)
-    gi = torch.full((S,), 4, dtype=torch.long)       # rest = 4
-    if dpann_ls is not None:
-        for s in range(S):
-            if node_leafsets[s] <= dpann_ls:
-                gi[s] = 3                            # DPANN clade
-    for ci, c in enumerate(children[:2]):
-        gi[c] = 1 + ci                               # root children = 1, 2
-    gi[root] = 0                                      # root = 0
-    return gi, 5
+    lab_of: List[str] = []
+    for s in range(S):
+        vs = node_leafsets[s]
+        chosen = "rest"
+        for ls, lbl in named:                        # first (smallest) enclosing
+            if vs <= ls:
+                chosen = lbl
+                break
+        lab_of.append(chosen)
+    labels = sorted(set(lab_of))
+    lab2id = {l: i for i, l in enumerate(labels)}
+    gi = torch.tensor([lab2id[l] for l in lab_of], dtype=torch.long)
+    return gi, len(labels)
 
 
 def group_index_for_species_helpers(species_helpers, tree_path, model_params_path,

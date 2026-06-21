@@ -233,7 +233,8 @@ def _run(args, data_dir: Path):
                 species_helpers, str(tree_path), S)
             omega_group_index = omega_group_index.to(device)
         print(f"      CLADE-GROUPED DTL: {n_dtl} classes from named clades; "
-              f"O: {n_o} classes (root/2-children/DPANN/rest)", flush=True)
+              f"O: {n_o} classes (DPANN/Eury/TackA/rest, AleRax DTL_br1_O structure)",
+              flush=True)
         if args.preflight_groups:
             import collections
             print("      DTL clade labels:", _cg_labels)
