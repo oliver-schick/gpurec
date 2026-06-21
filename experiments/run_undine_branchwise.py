@@ -343,6 +343,9 @@ def _run(args, data_dir: Path):
         leaf_E=leaf_E,
         leaf_obs_log=leaf_obs_log,
         verbose=True,
+        grad_reduction="sum",   # mini-batched L-BFGS needs Σ (not mean/n_batch) so the
+                                # gradient is consistent with the (summed) NLL — else the
+                                # line search stalls and omega freezes at uniform.
         brownian_sigma=brownian_sigma,
         brownian_root_sigma=brownian_root_sigma,
         parent_index=parent_index,

@@ -13,6 +13,7 @@ from gpurec.core.extract_parameters import extract_parameters, extract_parameter
 
 from .types import FixedPointInfo, LinearSolveStats, StepRecord
 from .implicit_grad import implicit_grad_loglik_vjp_wave
+from gpurec import distributed as _ddp
 
 
 def _cuda_mem_diag(device) -> str:
@@ -103,6 +104,12 @@ def optimize_theta_wave(
     origination_dirichlet_c: float = 0.0,
     origination_vertical_pi: torch.Tensor | None = None,
     origination_barrier_kind: str = "meanlog",
+    distributed: bool = False,
+    grad_reduction: str = "sum",   # Σ over families (correct for L-BFGS + DDP). "mean"
+                                   # (legacy /n_batch_accum) is WRONG for L-BFGS — it makes
+                                   # the grad inconsistent with the summed NLL -> line-search
+                                   # stall. Only matters when family_batch_size>0.
+    ddp_device=None,
 ):
     """Optimize theta using wave forward/backward + implicit gradient.
 
@@ -648,6 +655,30 @@ def optimize_theta_wave(
             )
         return log_pS, log_pD, log_pL, transfer_mat, mt
 
+    # --- DDP: family-sharded data-parallel reduction -------------------------
+    # Each rank runs the forward/backward on its family shard; the DATA nll+grad
+    # are all-reduced(SUM) BEFORE the priors (which are identical per rank, so are
+    # applied once on the reduced quantities). Loss/grad is a SUM over families and
+    # the E-adjoint solve is linear with a shared operator => sum-of-shards == global.
+    _distributed = bool(distributed) and _ddp.ddp_enabled()
+    _ar_dev = ddp_device if ddp_device is not None else device
+
+    def _reduce_data(nll, grad_theta, grad_omega):
+        """In-place all-reduce(SUM) of per-shard DATA nll + grads. NaN-sanitize the
+        grads LOCALLY first so one bad family-shard can't poison the cluster. Returns
+        the reduced nll (float)."""
+        if not _distributed:
+            return nll
+        if grad_theta is not None:
+            grad_theta.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
+            _ddp.all_reduce_sum_(grad_theta)
+        if grad_omega is not None:
+            grad_omega.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
+            _ddp.all_reduce_sum_(grad_omega)
+        _nllt = torch.tensor(float(nll), device=_ar_dev, dtype=dtype)
+        _ddp.all_reduce_sum_(_nllt)
+        return float(_nllt.item())
+
     def _forward_backward(theta_d, warm_E, selected_batch_ids=None, omega_d=None):
         """Full forward + backward.
 
@@ -809,7 +840,9 @@ def optimize_theta_wave(
                 n_batch_accum += 1
 
             # Gradient accumulation normalization: average over family batches.
-            if n_batch_accum > 0:
+            # grad_reduction="sum" skips it (pure Σ over families) — required for DDP
+            # so summing per-shard grads == the single-GPU sum; nll is already a Σ.
+            if grad_reduction != "sum" and n_batch_accum > 0:
                 grad_theta = grad_theta / float(n_batch_accum)
 
             # --- DIRECT omega gradient (origination='optimize') --------------
@@ -836,7 +869,7 @@ def optimize_theta_wave(
                     grad_omega = torch.autograd.grad(nll_omega, omega_leaf)[0].detach()
                 # Match the theta gradient's family-batch averaging so the two
                 # blocks of the joint scipy gradient are on the same scale.
-                if n_batch_accum > 0:
+                if grad_reduction != "sum" and n_batch_accum > 0:
                     grad_omega = grad_omega / float(n_batch_accum)
 
             if stats_list:
@@ -882,6 +915,8 @@ def optimize_theta_wave(
             theta_param_t = _gsum / _cnt.clamp(min=1).unsqueeze(1)
         else:
             theta_param_t = theta_t
+        if _distributed:
+            _ddp.broadcast_(theta_param_t)   # float-identical init across ranks
         theta_shape = theta_param_t.shape   # OPTIMISED param: [G,3] grouped else theta_init.shape
         n_theta = theta_param_t.numel()
         history: List[StepRecord] = []
@@ -907,6 +942,10 @@ def optimize_theta_wave(
                 nll, grad_theta, statsG, E_out, grad_omega = _forward_backward(
                     theta_d, warm_E_ref[0], omega_d=omega_d,
                 )
+                # DDP: all-reduce(SUM) the DATA nll + per-branch grads ACROSS shards
+                # here, BEFORE the barrier/priors (those are identical per rank, so
+                # are applied once on the reduced data). grad_omega is per-branch [S].
+                nll = _reduce_data(nll, grad_theta, grad_omega)
                 # Asymmetric Dirichlet (vertical) prior acts on per-branch p^O,
                 # BEFORE the group reduction (so it composes with grouped omega).
                 nll, grad_omega = _apply_origination_dirichlet(omega_d, nll, grad_omega)
@@ -914,6 +953,7 @@ def optimize_theta_wave(
                 grad_omega = _reduce_omega(grad_omega)
             else:
                 nll, grad_theta, statsG, E_out = _forward_backward(theta_d, warm_E_ref[0])
+                nll = _reduce_data(nll, grad_theta, None)
                 grad_omega = None
             nll, grad_theta = _apply_prior(theta_d, nll, grad_theta)
             # L2 ridge on the (possibly grouped) origination logits.
@@ -1073,6 +1113,9 @@ def optimize_theta_wave(
                     origination_dirichlet_c=origination_dirichlet_c,
                     origination_vertical_pi=origination_vertical_pi,
                     origination_barrier_kind=origination_barrier_kind,
+                    distributed=distributed,
+                    grad_reduction=grad_reduction,
+                    ddp_device=ddp_device,
                 )
                 # Merge histories: float32 phase first, then float64 phase
                 result64["history"] = history + result64["history"]
@@ -1113,6 +1156,9 @@ def optimize_theta_wave(
 
     # --- Iterative optimizers (adam, sgd) ---
     theta = torch.nn.Parameter(theta_init.to(device=device, dtype=dtype).clone())
+    if _distributed:
+        with torch.no_grad():
+            _ddp.broadcast_(theta.data)          # float-identical init across ranks
     if optimizer == 'sgd':
         opt = torch.optim.SGD([theta], lr=lr, momentum=momentum, nesterov=False)
     else:
@@ -1128,6 +1174,7 @@ def optimize_theta_wave(
 
         t_start = time.perf_counter()
         nll, grad_theta, statsG, E_out = _forward_backward(theta_d, warm_E, selected_batch_ids=selected_batch_ids)
+        nll = _reduce_data(nll, grad_theta, None)   # DDP: all-reduce DATA before the prior
         nll, grad_theta = _apply_prior(theta_d, nll, grad_theta)
         warm_E = E_out['E'].detach()
         iters_E = int(E_out['iterations'])
@@ -1175,6 +1222,9 @@ def optimize_theta_wave(
             )
         )
 
+        if _distributed:                          # collective early-stop (avoid deadlock)
+            _difft = torch.tensor(float(diff), device=_ar_dev, dtype=dtype)
+            _ddp.all_reduce_max_(_difft); diff = float(_difft.item())
         if diff < tol_theta and it > 1:
             break
 

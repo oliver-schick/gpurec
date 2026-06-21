@@ -5,9 +5,10 @@ from pathlib import Path
 import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from run_williams_branchwise import (
-    _load_species_helpers, _load_families_named, _build_wave_layout,
-    _sp_helpers_for_uniform, _build_leaf_E, _parse_fraction_missing, _norm_name,
+    _load_species_helpers, _build_wave_layout,
+    _sp_helpers_for_uniform, _build_leaf_E, _parse_fraction_missing,
 )
+from eval_at_alerax_rates import _load_families_named, _norm_name
 _LN2 = math.log(2.0)
 DEFAULT_DATA_DIR = ("/work/SzollosiU/gergely-szollosi/williams_run/data/"
                     "3_Reconciliation/Williams_et_al_2017")
