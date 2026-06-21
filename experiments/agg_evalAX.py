@@ -60,11 +60,13 @@ for model in ["DTL_br2", "DTL_br1_O"]:
             continue
         g = pf[r]
         a = read_alerax_perfam(model, r)
-        keys = [k for k in g if k in a] or [k for k in g if k.replace(".ale", "") in a]
-        # align by raw name; AleRax may strip .ale -> try both
+        # gpurec keys look like 'arCOG00001_01_PMSF.ufboot.ale'; AleRax strips to
+        # 'arCOG00001_01_PMSF'. Normalize gpurec -> bare stem before matching.
+        def _norm(k):
+            return k.replace(".ufboot.ale", "").replace(".ale", "")
         gx, ay = [], []
         for k in g:
-            ak = k if k in a else k.replace(".ale", "")
+            ak = _norm(k)
             if ak in a:
                 gx.append(g[k]); ay.append(a[ak])
         if len(gx) < 10:
