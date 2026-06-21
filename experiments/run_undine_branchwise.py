@@ -156,8 +156,13 @@ def _run(args, data_dir: Path):
     if not torch.cuda.is_available():
         raise SystemExit("CUDA required for optimization (run on the A100). "
                          "Use --preflight for the CPU data-wiring check.")
-    device = torch.device("cuda")
+    # Multi-GPU DDP: under torchrun (RANK/WORLD_SIZE set) init NCCL + pin the device;
+    # otherwise world=1 and this is a no-op (byte-identical single-GPU path).
+    from gpurec import distributed as ddp
+    rank, world, local, device = ddp.maybe_init_distributed(device_pref="cuda")
     dtype = torch.float64 if args.dtype == "float64" else torch.float32
+    if world > 1:
+        print(f"[DDP] rank {rank}/{world} (local {local}) on {device}", flush=True)
 
     from gpurec.optimization.wave_optimizer import optimize_theta_wave
     from gpurec.core.tree_prior import species_parent_index
@@ -177,10 +182,19 @@ def _run(args, data_dir: Path):
     if not families:
         raise SystemExit("no usable families after filtering; aborting.")
 
-    print(f"[2/5] Building cross-family wave layout for {len(families)} "
+    # DDP: each rank fits on its family SHARD. The loss is Sum_families, E is
+    # family-independent (recomputed per rank), and the E-adjoint solve is linear
+    # with a shared operator, so the optimizer's all_reduce(SUM) of nll+grad makes
+    # sum-of-shards == whole (validated: Part C NCCL 9e-13). World=1 -> no-op.
+    fam_use = ddp.shard_families(families, rank, world) if world > 1 else families
+    if world > 1:
+        print(f"[DDP] rank {rank}: {len(fam_use)}/{len(families)} families this shard",
+              flush=True)
+
+    print(f"[2/5] Building cross-family wave layout for {len(fam_use)} "
           f"families ...", flush=True)
     t0 = time.time()
-    wave_layout, root_clade_ids = _build_wave_layout(families, device, dtype)
+    wave_layout, root_clade_ids = _build_wave_layout(fam_use, device, dtype)
     sp_helpers_gpu, _ = _sp_helpers_for_uniform(species_helpers, device, dtype)
     unnorm_row_max = torch.log2(
         species_helpers["Recipients_mat"]
@@ -235,6 +249,11 @@ def _run(args, data_dir: Path):
         print(f"      CLADE-GROUPED DTL: {n_dtl} classes from named clades; "
               f"O: {n_o} classes (DPANN/Eury/TackA/rest, AleRax DTL_br1_O structure)",
               flush=True)
+        if omega_group_index is not None:
+            import collections as _coll
+            print("      O class sizes (branches per origination class):",
+                  dict(sorted(_coll.Counter(omega_group_index.tolist()).items())),
+                  flush=True)
         if args.preflight_groups:
             import collections
             print("      DTL clade labels:", _cg_labels)
@@ -337,13 +356,15 @@ def _run(args, data_dir: Path):
         optimizer=args.optimizer,
         specieswise=True,
         pibar_mode=args.pibar_mode,
-        families=families,
+        families=fam_use,
         family_batch_size=args.family_batch_size,
         device=device,
         dtype=dtype,
         leaf_E=leaf_E,
         leaf_obs_log=leaf_obs_log,
-        verbose=True,
+        verbose=(rank == 0),
+        distributed=(world > 1),
+        ddp_device=device,
         grad_reduction="sum",   # mini-batched L-BFGS needs Σ (not mean/n_batch) so the
                                 # gradient is consistent with the (summed) NLL — else the
                                 # line search stalls and omega freezes at uniform.
@@ -381,6 +402,13 @@ def _run(args, data_dir: Path):
     logL = float(result["log_likelihood"])
     data_nll = float(result.get("data_negative_log_likelihood", nll))
     data_logL = -data_nll
+
+    # DDP: the optimizer all-reduced nll+grad, so result is GLOBAL (all families);
+    # only rank 0 reports + writes. Non-zero ranks have done their collective work.
+    if rank != 0:
+        if world > 1:
+            ddp.cleanup()
+        return 0
 
     print(f"\n{'=' * 60}")
     print(f"  DONE  root={args.root}  families={len(families)}  "
@@ -434,6 +462,8 @@ def _run(args, data_dir: Path):
     with open(sidecar, "w") as fh:
         json.dump(payload, fh, indent=2)
     print(f"  sidecar written -> {sidecar}", flush=True)
+    if world > 1:
+        ddp.cleanup()
     return 0
 
 
