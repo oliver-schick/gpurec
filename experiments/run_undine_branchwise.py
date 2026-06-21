@@ -233,7 +233,41 @@ def _run(args, data_dir: Path):
     # the paper's per-clade branch-wise DTL_br + {root, 2 children, DPANN} O).
     group_index = None
     omega_group_index = None
-    if args.clade_groups_from_tree:
+    _alerax_theta_init = None       # AleRax-seeded theta [S,3] (--init-from-alerax)
+    _alerax_omega_init = None       # AleRax-seeded omega [S]
+    if args.clade_groups:
+        # AleRax's EXACT grouping + (optional) init at AleRax's fitted rates. Tests
+        # whether gpurec's optimizer stays in AleRax's (Eury) basin or descends to SGA.
+        from clade_groups import (group_index_for_species_helpers,
+                                  omega_group_index_for_species_helpers,
+                                  branch_params_from_alerax)
+        cg_dir = Path(args.clade_groups)
+        cg_tree = cg_dir / "species_trees" / "starting_species_tree.newick"
+        cg_mp = cg_dir / "model_parameters" / "model_parameters.txt"
+        if not cg_mp.exists():
+            raise SystemExit(f"--clade-groups: missing {cg_mp}")
+        cg_tree = str(cg_tree) if cg_tree.exists() else str(tree_path)
+        group_index, _cat_rates, _cat_orig, _cgd = group_index_for_species_helpers(
+            species_helpers, cg_tree, str(cg_mp))
+        if _cgd["gpurec_unmapped"]:
+            raise SystemExit(f"--clade-groups: {len(_cgd['gpurec_unmapped'])} unmapped "
+                             f"nodes (tree mismatch): {_cgd['gpurec_unmapped'][:4]}")
+        group_index = group_index.to(device)
+        n_dtl = int(group_index.max().item()) + 1
+        n_o = 0
+        if args.origination == "optimize":
+            omega_group_index, n_o = omega_group_index_for_species_helpers(
+                species_helpers, cg_tree, str(cg_mp))
+            if omega_group_index is not None:
+                omega_group_index = omega_group_index.to(device)
+        if args.init_from_alerax:
+            _rb, _ob, _ = branch_params_from_alerax(species_helpers, cg_tree, str(cg_mp))
+            _alerax_theta_init = torch.log2(_rb.clamp_min(1e-10)).to(device=device, dtype=dtype)
+            if _ob is not None:
+                _alerax_omega_init = torch.log2(_ob.clamp_min(1e-12)).to(device=device, dtype=dtype)
+        print(f"      ALERAX-EXACT GROUPING: {n_dtl} DTL classes, O: {n_o} classes "
+              f"(from {cg_dir.name}); init_from_alerax={args.init_from_alerax}", flush=True)
+    elif args.clade_groups_from_tree:
         from clade_groups import (tree_clade_group_index, tree_origination_group_index,
                                   BIGTREE_DTL_CLADES)
         _wl = None if args.all_named_clades else BIGTREE_DTL_CLADES
@@ -273,7 +307,8 @@ def _run(args, data_dir: Path):
     origination_l2 = 0.0
     origination_info = {"origination": args.origination}
     if args.origination == "optimize":
-        omega_init = torch.zeros(S, dtype=dtype, device=device)
+        omega_init = (_alerax_omega_init if _alerax_omega_init is not None
+                      else torch.zeros(S, dtype=dtype, device=device))
         # p^O = softmax(omega) is a probability distribution -> L2 ridge on the
         # logits (shrink toward uniform), NOT a Brownian prior. 0 = free.
         origination_l2 = float(args.origination_l2)
@@ -339,7 +374,8 @@ def _run(args, data_dir: Path):
               f"c={args.origination_dirichlet} rho={_rho} "
               f"(pi_min={float(origination_vertical_pi.min()):.2e})", flush=True)
 
-    theta_init = math.log2(args.init_rate) * torch.ones(S, 3, dtype=dtype, device=device)
+    theta_init = (_alerax_theta_init if _alerax_theta_init is not None
+                  else math.log2(args.init_rate) * torch.ones(S, 3, dtype=dtype, device=device))
 
     print(f"[4/5] Optimizing specieswise theta [S={S},3]  "
           f"(optimizer={args.optimizer}, fm-mode={args.fm_mode}, "
@@ -525,6 +561,16 @@ def _parse_args(argv=None):
     p.add_argument("--all-named-clades", action="store_true",
                    help="Use ALL named internal clades (~30) instead of the paper's "
                         "explicit DTL_br2 whitelist (22). Richer DTL_br model.")
+    p.add_argument("--clade-groups", default=None,
+                   help="AleRax's EXACT grouping: a per-root dir with "
+                        "species_trees/starting_species_tree.newick + "
+                        "model_parameters/model_parameters.txt (group branches by "
+                        "AleRax's distinct rate tuples). Use INSTEAD of "
+                        "--clade-groups-from-tree to match AleRax's parametrization.")
+    p.add_argument("--init-from-alerax", action="store_true",
+                   help="With --clade-groups: seed theta (and omega) at AleRax's "
+                        "fitted per-branch rates instead of uniform -> tests whether "
+                        "gpurec stays in AleRax's (Eury) basin or descends to SGA.")
     p.add_argument("--family-batch-size", type=int, default=0,
                    help="mini-batch families for forward/backward to bound GPU "
                         "memory (0=all at once). Use a few hundred for the big tree.")
