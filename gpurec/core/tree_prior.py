@@ -237,3 +237,45 @@ def brownian_log_prior_and_grad(
         grad[r] = grad[r] + inv_var_root * root_dev
 
     return penalty, grad
+
+
+def tv_log_prior_and_grad(theta, parent_index, lam, eps: float = 1e-3):
+    """Smoothed TOTAL-VARIATION (fused-lasso) penalty on parent-child rate
+    differences. Unlike the Brownian (L2) prior, the L1-like penalty drives
+    adjacent differences to EXACTLY zero -> PIECEWISE-CONSTANT per-branch rates =
+    data-driven clade grouping (the continuous SOTA analog of AleRax's DTL_br,
+    discovering the groups instead of fixing them). Pseudo-Huber rho is used so
+    the penalty is smooth (L-BFGS-safe)::
+
+        rho(d) = sqrt(d^2 + eps^2) - eps        (~ |d| for |d| >> eps)
+        P      = sum_a lam_a * sum_{v != root} rho(theta[v,a] - theta[pa(v),a])
+        rho'(d)= d / sqrt(d^2 + eps^2);  grad[v] += g, grad[pa(v)] -= g
+
+    Add ``penalty`` to the NLL and ``grad`` ([S,K]) to the NLL gradient. ``theta``
+    [S,K] log2, ``parent_index`` [S] (root = -1 or self). ``lam`` scalar or [K];
+    ``eps`` in log2 units sets the |d| scale below which the penalty is quadratic.
+    """
+    if theta.ndim != 2:
+        raise ValueError(f"theta must have shape [S, K], got {tuple(theta.shape)}")
+    S, K = theta.shape
+    device, dtype = theta.device, theta.dtype
+    parent_index = parent_index.to(device=device, dtype=torch.long)
+    lam_v = torch.as_tensor(lam, device=device, dtype=dtype)
+    if lam_v.ndim == 0:
+        lam_v = lam_v.expand(K)
+    elif lam_v.shape != (K,):
+        raise ValueError(f"lam must be scalar or shape [{K}], got {tuple(lam_v.shape)}")
+    arange = torch.arange(S, device=device)
+    is_root = (parent_index < 0) | (parent_index == arange)
+    nonroot = ~is_root
+    parent_safe = torch.where(nonroot, parent_index, arange)         # [S]
+    delta = theta - theta.index_select(0, parent_safe)              # [S, K]
+    delta = torch.where(nonroot.unsqueeze(1), delta, torch.zeros_like(delta))
+    r = torch.sqrt(delta * delta + eps * eps)                        # [S, K]
+    penalty = (lam_v * (r - eps).sum(dim=0)).sum()
+    g = lam_v.unsqueeze(0) * delta / r                               # rho'(d) [S, K]
+    g = torch.where(nonroot.unsqueeze(1), g, torch.zeros_like(g))
+    grad = torch.zeros_like(theta)
+    grad = grad + g                                                  # grad[v] += g
+    grad.index_add_(0, parent_safe, -g)                             # grad[pa(v)] -= g
+    return penalty, grad

@@ -438,6 +438,8 @@ def _run(args, data_dir: Path):
                                 # gradient is consistent with the (summed) NLL — else the
                                 # line search stalls and omega freezes at uniform.
         brownian_sigma=brownian_sigma,
+        dtl_tv_lambda=args.dtl_tv_lambda,
+        dtl_tv_eps=args.dtl_tv_eps,
         brownian_root_sigma=brownian_root_sigma,
         parent_index=parent_index,
         origination=args.origination,
@@ -621,6 +623,13 @@ def _parse_args(argv=None):
                         "memory (0=all at once). Use a few hundred for the big tree.")
     p.add_argument("--prior", default="none", choices=["none", "brownian"])
     p.add_argument("--brownian-sigma", type=float, default=1.0)
+    p.add_argument("--dtl-tv-lambda", type=float, default=0.0,
+                   help="FUSED-LASSO / total-variation prior on per-branch DTL rates "
+                        "(smoothed-L1 on parent-child log2-rate diffs) -> PIECEWISE-CONSTANT "
+                        "rates = data-driven clade grouping (SOTA branchwise w/o overparam). "
+                        "0=off. Use WITHOUT --clade-groups (full per-branch theta).")
+    p.add_argument("--dtl-tv-eps", type=float, default=1e-3,
+                   help="pseudo-Huber smoothing scale (log2 units) for --dtl-tv-lambda.")
     p.add_argument("--brownian-root-sigma", type=float, default=5.0)
     p.add_argument("--dtype", default="float64", choices=["float32", "float64"])
     p.add_argument("--out", default=None)

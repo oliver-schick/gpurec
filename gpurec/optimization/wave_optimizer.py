@@ -86,6 +86,8 @@ def optimize_theta_wave(
     brownian_sigma=None,
     brownian_root_sigma: float = 5.0,
     brownian_mu=None,
+    dtl_tv_lambda: float = 0.0,
+    dtl_tv_eps: float = 1e-3,
     parent_index: torch.Tensor | None = None,
     theta_bounds=None,
     origination: str = 'uniform',
@@ -360,11 +362,18 @@ def optimize_theta_wave(
     # Only meaningful for specieswise theta [S,3]; skip otherwise so the
     # global/genewise paths stay byte-identical.
     _use_prior = brownian_sigma is not None
-    if _use_prior and not (specieswise and theta_init.ndim == 2 and theta_init.shape[-1] == 3):
+    _use_tv = float(dtl_tv_lambda) > 0.0          # fused-lasso / total-variation prior
+    _specieswise_ok = specieswise and theta_init.ndim == 2 and theta_init.shape[-1] == 3
+    if _use_prior and not _specieswise_ok:
         if verbose:
             print("  [brownian prior requested but theta is not specieswise [S,3]; "
                   "skipping prior]", flush=True)
         _use_prior = False
+    if _use_tv and not _specieswise_ok:
+        if verbose:
+            print("  [TV prior requested but theta is not specieswise [S,3]; skipping]",
+                  flush=True)
+        _use_tv = False
 
     # Origination regularization: L2 (ridge) on the softmax logits.
     # The origination weights p^O_e = softmax(omega) form a PROBABILITY
@@ -445,19 +454,24 @@ def optimize_theta_wave(
         _dir_pi = _dir_pi / _dir_pi.sum()                 # normalize to a distribution
 
     _brownian_prior = None
+    _tv_prior = None
     _prior_parent_index = None
     _prior_sigma = None
     _prior_root_sigma = None
     _prior_mu = None
-    if _use_prior:
-        from gpurec.core.tree_prior import (
-            brownian_log_prior_and_grad as _brownian_prior,
-            species_parent_index as _species_parent_index,
-        )
+    if _use_prior or _use_tv:
+        from gpurec.core.tree_prior import species_parent_index as _species_parent_index
         if parent_index is None:
             _prior_parent_index = _species_parent_index(species_helpers).to(device)
         else:
             _prior_parent_index = parent_index.to(device=device, dtype=torch.long)
+    if _use_tv:
+        from gpurec.core.tree_prior import tv_log_prior_and_grad as _tv_prior
+        if verbose:
+            print(f"  [TV/fused-lasso DTL prior: lambda={dtl_tv_lambda} eps={dtl_tv_eps} "
+                  f"-> piecewise-constant per-branch rates]", flush=True)
+    if _use_prior:
+        from gpurec.core.tree_prior import brownian_log_prior_and_grad as _brownian_prior
         _prior_sigma = brownian_sigma
         _prior_root_sigma = brownian_root_sigma
         # Default root-anchor centre = theta_init root row (== log2(init_rate)
@@ -472,13 +486,19 @@ def optimize_theta_wave(
             _prior_mu = brownian_mu
 
     def _apply_prior(theta_d, nll, grad_theta):
-        """Add the Brownian rate penalty to nll and its gradient to grad_theta."""
-        if not _use_prior:
-            return nll, grad_theta
-        penalty, p_grad = _brownian_prior(
-            theta_d, _prior_parent_index, _prior_sigma, _prior_root_sigma, _prior_mu,
-        )
-        return nll + float(penalty.item()), grad_theta + p_grad
+        """Add the DTL rate penalties (Brownian and/or TV/fused-lasso) to nll and
+        their gradients to grad_theta."""
+        if _use_prior:
+            penalty, p_grad = _brownian_prior(
+                theta_d, _prior_parent_index, _prior_sigma, _prior_root_sigma, _prior_mu,
+            )
+            nll, grad_theta = nll + float(penalty.item()), grad_theta + p_grad
+        if _use_tv:
+            pen_tv, g_tv = _tv_prior(
+                theta_d, _prior_parent_index, dtl_tv_lambda, dtl_tv_eps,
+            )
+            nll, grad_theta = nll + float(pen_tv.item()), grad_theta + g_tv
+        return nll, grad_theta
 
     def _apply_origination_prior(omega_d, nll, grad_omega):
         """L2 (ridge) penalty on the origination logits: lambda * sum(omega^2).
@@ -1095,7 +1115,10 @@ def optimize_theta_wave(
                     # Pass the RESOLVED root-anchor centre (not None) so the
                     # float64 retry keeps the same prior centre as phase 1.
                     brownian_mu=_prior_mu if _use_prior else brownian_mu,
-                    parent_index=_prior_parent_index if _use_prior else parent_index,
+                    dtl_tv_lambda=dtl_tv_lambda,
+                    dtl_tv_eps=dtl_tv_eps,
+                    parent_index=(_prior_parent_index if (_use_prior or _use_tv)
+                                  else parent_index),
                     theta_bounds=theta_bounds,
                     origination=origination,
                     omega_init=omega_final if _opt_origination else None,
