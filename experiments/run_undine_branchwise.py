@@ -328,6 +328,25 @@ def _run(args, data_dir: Path):
         omega_init = (_rates_omega_init if _rates_omega_init is not None
                       else _alerax_omega_init if _alerax_omega_init is not None
                       else torch.zeros(S, dtype=dtype, device=device))
+        # STRUCTURED-O SEED (the principled basin-finding init): when no warm-start
+        # omega is given, seed origination CONCENTRATED at the deep/root region --
+        # omega = -depth*scale, so softmax(omega) peaks at depth 0 (the root) and
+        # decays outward. This encodes the vertical-evolution / LACA hypothesis (genes
+        # originate once, deep) as a STARTING POINT (not a destructive penalty), placing
+        # the optimizer in the deep/Eury basin's attractor. scale=0 -> uniform (current).
+        if (float(args.init_omega_depth_scale) != 0.0
+                and _rates_omega_init is None and _alerax_omega_init is None):
+            _par = parent_index.tolist()
+            _dep = [0] * S
+            for e in range(S):
+                d, cur, seen = 0, e, 0
+                while _par[cur] >= 0 and _par[cur] != cur and seen <= S:
+                    d += 1; cur = _par[cur]; seen += 1
+                _dep[e] = d
+            omega_init = (-float(args.init_omega_depth_scale)
+                          * torch.tensor(_dep, dtype=dtype, device=device))
+            print(f"      STRUCTURED-O SEED: omega=-depth*{args.init_omega_depth_scale} "
+                  f"(O concentrated at the root/deep region; depth 0..{max(_dep)})", flush=True)
         # p^O = softmax(omega) is a probability distribution -> L2 ridge on the
         # logits (shrink toward uniform), NOT a Brownian prior. 0 = free.
         origination_l2 = float(args.origination_l2)
@@ -562,6 +581,11 @@ def _parse_args(argv=None):
                    help="Warm-start theta (+free omega) from a previous fit's "
                         "*.rates.txt.json sidecar. Used to chain the ANNEALING stages "
                         "(each relaxed-lambda stage continues from the previous MAP).")
+    p.add_argument("--init-omega-depth-scale", type=float, default=0.0,
+                   help="STRUCTURED-O SEED: init free omega=-depth*scale so origination "
+                        "starts CONCENTRATED at the deep/root region (vertical/LACA prior "
+                        "as an init). Places the optimizer in the deep/Eury basin attractor. "
+                        "0=uniform. Multi-start over a few scales + pick the best logL.")
     p.add_argument("--fm-mode", default="off", choices=["both", "e-only", "off"])
     p.add_argument("--no-fraction-missing", action="store_true")
     p.add_argument("--origination", default="uniform", choices=["uniform", "optimize"])
