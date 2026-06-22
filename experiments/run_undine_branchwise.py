@@ -378,8 +378,20 @@ def _run(args, data_dir: Path):
               f"c={args.origination_dirichlet} rho={_rho} "
               f"(pi_min={float(origination_vertical_pi.min()):.2e})", flush=True)
 
-    theta_init = (_alerax_theta_init if _alerax_theta_init is not None
-                  else math.log2(args.init_rate) * torch.ones(S, 3, dtype=dtype, device=device))
+    if _alerax_theta_init is not None:
+        theta_init = _alerax_theta_init
+    elif args.init_dlt:
+        # GLOBAL-RATE WARM-UP: seed every branch at a single (D,L,T) (e.g. AleRax's
+        # global-model rates) instead of uniform 0.1 -> tests whether good DTL
+        # magnitudes drop the optimizer into the deep (Eury) basin. O still uniform.
+        _dlt = [float(x) for x in args.init_dlt.split(",")]
+        if len(_dlt) != 3:
+            raise SystemExit("--init-dlt expects 'D,L,T' (3 comma-sep rates)")
+        theta_init = torch.log2(torch.tensor(_dlt, dtype=dtype, device=device)
+                                .clamp_min(1e-10)).repeat(S, 1)
+        print(f"      GLOBAL-RATE init: D,L,T={_dlt} (uniform across branches)", flush=True)
+    else:
+        theta_init = math.log2(args.init_rate) * torch.ones(S, 3, dtype=dtype, device=device)
 
     print(f"[4/5] Optimizing specieswise theta [S={S},3]  "
           f"(optimizer={args.optimizer}, fm-mode={args.fm_mode}, "
@@ -523,6 +535,10 @@ def _parse_args(argv=None):
     p.add_argument("--optimizer", default="lbfgs", choices=["lbfgs", "adam", "sgd"])
     p.add_argument("--pibar-mode", default="uniform", choices=["uniform", "dense", "topk"])
     p.add_argument("--init-rate", type=float, default=0.1)
+    p.add_argument("--init-dlt", default=None,
+                   help="GLOBAL-RATE warm-up: 'D,L,T' to seed every branch at (instead "
+                        "of uniform --init-rate). Basin-finding: does a good global DTL "
+                        "init reach the deep/Eury basin? e.g. '0.07,0.30,0.17'.")
     p.add_argument("--fm-mode", default="off", choices=["both", "e-only", "off"])
     p.add_argument("--no-fraction-missing", action="store_true")
     p.add_argument("--origination", default="uniform", choices=["uniform", "optimize"])
