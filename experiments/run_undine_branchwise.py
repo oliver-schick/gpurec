@@ -307,11 +307,26 @@ def _run(args, data_dir: Path):
                            "brownian_root_sigma": brownian_root_sigma,
                            "units": "log2"})
 
+    # WARM-START from a previous fit's sidecar (for the annealing chain): seed theta
+    # (and free omega) at the previous stage's MAP so each relaxed-lambda stage
+    # continues from the last -> graduated optimization into the deep basin.
+    _rates_theta_init = None
+    _rates_omega_init = None
+    if args.init_from_rates:
+        _sc = json.load(open(args.init_from_rates))
+        _rates_theta_init = torch.tensor(_sc["theta_log2"], dtype=dtype, device=device)
+        _om = _sc.get("origination", {}).get("omega_log2")
+        if _om is not None:
+            _rates_omega_init = torch.tensor(_om, dtype=dtype, device=device)
+        print(f"      WARM-START from {Path(args.init_from_rates).name} "
+              f"(theta{'+omega' if _om is not None else ''})", flush=True)
+
     omega_init = None
     origination_l2 = 0.0
     origination_info = {"origination": args.origination}
     if args.origination == "optimize":
-        omega_init = (_alerax_omega_init if _alerax_omega_init is not None
+        omega_init = (_rates_omega_init if _rates_omega_init is not None
+                      else _alerax_omega_init if _alerax_omega_init is not None
                       else torch.zeros(S, dtype=dtype, device=device))
         # p^O = softmax(omega) is a probability distribution -> L2 ridge on the
         # logits (shrink toward uniform), NOT a Brownian prior. 0 = free.
@@ -378,7 +393,9 @@ def _run(args, data_dir: Path):
               f"c={args.origination_dirichlet} rho={_rho} "
               f"(pi_min={float(origination_vertical_pi.min()):.2e})", flush=True)
 
-    if _alerax_theta_init is not None:
+    if _rates_theta_init is not None:
+        theta_init = _rates_theta_init
+    elif _alerax_theta_init is not None:
         theta_init = _alerax_theta_init
     elif args.init_dlt:
         # GLOBAL-RATE WARM-UP: seed every branch at a single (D,L,T) (e.g. AleRax's
@@ -539,6 +556,10 @@ def _parse_args(argv=None):
                    help="GLOBAL-RATE warm-up: 'D,L,T' to seed every branch at (instead "
                         "of uniform --init-rate). Basin-finding: does a good global DTL "
                         "init reach the deep/Eury basin? e.g. '0.07,0.30,0.17'.")
+    p.add_argument("--init-from-rates", default=None,
+                   help="Warm-start theta (+free omega) from a previous fit's "
+                        "*.rates.txt.json sidecar. Used to chain the ANNEALING stages "
+                        "(each relaxed-lambda stage continues from the previous MAP).")
     p.add_argument("--fm-mode", default="off", choices=["both", "e-only", "off"])
     p.add_argument("--no-fraction-missing", action="store_true")
     p.add_argument("--origination", default="uniform", choices=["uniform", "optimize"])
