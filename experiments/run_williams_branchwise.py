@@ -642,7 +642,23 @@ def _run(args, data_dir: Path):
     # 5. Optimize (specieswise -> [S,3] branch-wise rates).
     init_log2 = math.log2(args.init_rate)
     theta_init = init_log2 * torch.ones(S, 3, dtype=dtype, device=device)
-    if _alerax_theta_init is not None:
+    # WARM-START options (for cold-recovery / annealing experiments):
+    _rates_omega_init = None
+    if args.init_from_rates:
+        _sc = json.load(open(args.init_from_rates))
+        theta_init = torch.tensor(_sc["theta_log2"], dtype=dtype, device=device)
+        _om = _sc.get("origination", {}).get("omega_log2")
+        if _om is not None:
+            _rates_omega_init = torch.tensor(_om, dtype=dtype, device=device)
+        print(f"      WARM-START from {Path(args.init_from_rates).name}", flush=True)
+    elif args.init_dlt:
+        _dlt = [float(x) for x in args.init_dlt.split(",")]
+        if len(_dlt) != 3:
+            raise SystemExit("--init-dlt expects 'D,L,T'")
+        theta_init = torch.log2(torch.tensor(_dlt, dtype=dtype, device=device)
+                                .clamp_min(1e-10)).repeat(S, 1)
+        print(f"      GLOBAL-RATE init: D,L,T={_dlt}", flush=True)
+    elif _alerax_theta_init is not None:
         theta_init = _alerax_theta_init.clone()           # AleRax-seeded init
 
     # --- Brownian (TKP) rate prior + AleRax-style box bounds ----------------
@@ -740,7 +756,9 @@ def _run(args, data_dir: Path):
     origination_l2 = 0.0
     if args.origination == "optimize":
         omega_init = torch.zeros(S, dtype=dtype, device=device)  # uniform init
-        if _alerax_omega_init is not None:
+        if _rates_omega_init is not None:
+            omega_init = _rates_omega_init.clone()        # warm-start from a sidecar
+        elif _alerax_omega_init is not None:
             omega_init = _alerax_omega_init.clone()       # AleRax-seeded omega
         # p^O_e = softmax(omega) is a probability distribution (sum=1), so the
         # appropriate regularizer is L2/ridge on the logits (shrink toward
@@ -792,6 +810,8 @@ def _run(args, data_dir: Path):
         leaf_obs_log=leaf_obs_log,
         verbose=True,
         brownian_sigma=brownian_sigma,
+        dtl_tv_lambda=args.dtl_tv_lambda,
+        dtl_tv_eps=args.dtl_tv_eps,
         brownian_root_sigma=brownian_root_sigma,
         parent_index=parent_index,
         theta_bounds=theta_bounds,
@@ -943,6 +963,14 @@ def _parse_args(argv=None):
                    help="Optimizer (default: lbfgs)")
     p.add_argument("--pibar-mode", default="uniform",
                    help="pibar mode (default: uniform)")
+    p.add_argument("--dtl-tv-lambda", type=float, default=0.0,
+                   help="fused-lasso/total-variation prior on per-branch DTL rates "
+                        "(piecewise-constant = auto clade-grouping). 0=off.")
+    p.add_argument("--dtl-tv-eps", type=float, default=1e-3)
+    p.add_argument("--init-dlt", default=None,
+                   help="global-rate warm-up 'D,L,T' (seed every branch).")
+    p.add_argument("--init-from-rates", default=None,
+                   help="warm-start theta(+omega) from a previous *.rates.txt.json sidecar.")
     p.add_argument("--init-rate", type=float, default=0.1,
                    help="Initial rate for all D,L,T (natural space); theta_init "
                         "= log2(init_rate). Default: 0.1")
