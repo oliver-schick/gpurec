@@ -134,7 +134,7 @@ def au_rank(per_by_root, roots):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="DTL_br2", choices=["DTL_br2", "DTL_br1_O"])
+    ap.add_argument("--model", default="DTL_br2", choices=["global", "DTL_br2", "DTL_br1_O"])
     ap.add_argument("--fm-mode", default="e-only", choices=["off", "e-only", "both"])
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
