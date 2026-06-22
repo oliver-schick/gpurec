@@ -29,9 +29,9 @@ from clade_groups import branch_params_from_alerax     # noqa: E402
 from gpurec.core.tree_prior import species_parent_index  # noqa: E402
 
 _LN2 = math.log(2.0)
-DD = Path("/work/SzollosiU/gergely-szollosi/williams_run/undine/alerax_ref/"
-          "3_Reconciliation/This_study")
-BASE = DD / "5_reconcilation models"
+DD = Path("/work/SzollosiU/gergely-szollosi/williams_run/data/3_Reconciliation/This_study")
+BASE = Path("/work/SzollosiU/gergely-szollosi/williams_run/undine/alerax_ref/"
+            "3_Reconciliation/This_study/5_reconcilation models")
 ALE = sorted(p for p in glob.glob(str(DD / "3_UFBOOTs" / "ufboot_for_alerax" / "*.ale"))
              if not Path(p).name.startswith("._"))
 CHUNK = 500
