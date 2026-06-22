@@ -35,8 +35,15 @@ if not rows:
     print("  (no outputs yet)")
 else:
     b0 = rows[0][1]
-    eury = next((dl for r, dl, e, l in rows if r == "Eury"), None)
-    print(f"  Eury={eury} -> {'DEEP (recovered COLD!)' if eury and eury > -1.70e6 else 'SGA/near-tie'}")
+    e = next(((dl, lam) for r, dl, eff, lam in rows if r == "Eury"), None)
+    n_done = sum(1 for r, dl, eff, lam in rows if lam == 0)
+    if e is None:
+        verdict = "Eury not fitted yet"
+    elif e[1] != 0:
+        verdict = f"chains still annealing (Eury at L={e[1]}, not final) -> NO verdict yet"
+    else:
+        verdict = "DEEP (recovered COLD!)" if e[0] > -1.70e6 else "SGA/near-tie"
+    print(f"  [{n_done}/15 chains reached L0]  Eury={e[0] if e else None} -> {verdict}")
     for root, dl, eff, lam in rows:
         tag = "[deep]" if root in DEEP else ("[SGA]" if root in SGA else "")
         flag = "  <-- DEEP" if root in {"Eury", "TackA", "DPANN", "MHH"} else ""
