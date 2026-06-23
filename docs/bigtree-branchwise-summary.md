@@ -1,7 +1,8 @@
 # Fully branch-wise DTL rates on the archaeal tree — preliminary
 
 (Big tree = This_study / Undine C60, 257 taxa, 7,059 families; Euryarchaeota root.
-Figures: `rate_violin_bigtree_Eury.png`, `laca_families_bigtree_Eury.png`.)
+Figures: [`rate_violin_bigtree_Eury.png`](rate_violin_bigtree_Eury.png),
+[`laca_families_bigtree_Eury.png`](laca_families_bigtree_Eury.png) — embedded below.)
 
 When we let the duplication, transfer and loss rates vary freely along every branch of
 the species tree — rather than grouping branches into a handful of rate categories, as
@@ -31,3 +32,13 @@ as a **consistency/robustness check, not an independent recovery of the root**.
 *In one line:* allowing fully branch-wise DTL rates recovers the same Euryarchaeota root, the
 same ancestral gene content, and clade-structured duplication/transfer rates as AleRax — a
 preliminary, reassuring consistency check.
+
+## Figures
+
+**Genes at the root (LACA):**
+
+![LACA genes at the root](laca_families_bigtree_Eury.png)
+
+**Per-clade DTL rates — branchwise (free per-branch) vs shared (clade-grouped):**
+
+![Per-clade DTL rate violins](rate_violin_bigtree_Eury.png)
