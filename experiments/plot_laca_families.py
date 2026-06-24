@@ -1,39 +1,38 @@
-"""LACA bar chart: gene families at the root, big tree (Eury). Numbers from
-undine/laca_Eury.json (thresholded content PP>=0.5; the expected counts are NOT shown).
-  total families analysed = 7059
-  at root: branchwise (free per-branch) = 903 ; clade-grouped (AleRax rates) = 772
-  shared = 722 (Jaccard 0.76)
-"""
+"""LACA genome-size bar chart, three models, isolating the origination effect from the
+rate-granularity effect. Order: uniform clade -> non-uniform clade -> branchwise.
+Reads laca_compare.py's 3-model JSON (uniform_clade / nonuniform_clade / branchwise)."""
 import sys, json
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-# defaults from laca_Eury.json (override by passing the json path as argv[1])
-F, bw, ax_, shared, jac = 7059, 903, 772, 722, 0.758
-if len(sys.argv) > 1:
-    d = json.load(open(sys.argv[1]))
-    F, bw, ax_, shared = d["F"], d["content_full"], d["content_alerax"], d["inter"]
-    jac = d["jaccard"]
+d = json.load(open(sys.argv[1]))
 out = sys.argv[2] if len(sys.argv) > 2 else "laca_families.png"
-
-fig, ax = plt.subplots(figsize=(5.4, 5.2))
-x = [0, 1]
-labels = ["branchwise\n(free per-branch)", "clade-grouped\n(AleRax rates)"]
-ax.bar(x, [shared, shared], width=0.62, color="#2c4a78", label=f"shared ({shared})")
-ax.bar(x, [bw - shared, ax_ - shared], bottom=[shared, shared], width=0.62,
-       color="#9bb4d4", label="model-specific")
-for xi, tot in zip(x, [bw, ax_]):
-    ax.text(xi, tot + 22, f"{tot}", ha="center", fontsize=14, weight="bold")
-ax.set_xticks(x); ax.set_xticklabels(labels, fontsize=11.5)
-ax.set_ylabel("gene families at the root  (LACA genome)", fontsize=11.5)
-ax.set_title(f"Last archaeal common ancestor — genes at the root\n"
-             f"{F:,} gene families analysed  ·  {shared} shared (Jaccard {jac:.2f})",
-             fontsize=11.5)
-ax.legend(fontsize=10, loc="upper right", framealpha=0.9)
-ax.set_ylim(0, max(bw, ax_) * 1.18)
+F = d["F"]
+models = [
+    ("uniform clade\nclade rates, uniform origination",      d["uniform_clade"]["content"],    "#b0b8c1"),
+    ("non-uniform clade\nclade rates, fitted origination",   d["nonuniform_clade"]["content"],  "#6b8cae"),
+    ("branchwise\nper-branch rates, fitted origination",     d["branchwise"]["content"],        "#2c4a78"),
+]
+fig, ax = plt.subplots(figsize=(7.4, 5.4))
+xs = range(len(models))
+bars = ax.bar(xs, [m[1] for m in models], color=[m[2] for m in models],
+              width=0.62, edgecolor="k", linewidth=0.7)
+for b, m in zip(bars, models):
+    ax.text(b.get_x() + b.get_width() / 2, m[1] + max(mm[1] for mm in models) * 0.02,
+            f"{m[1]}", ha="center", fontsize=15, weight="bold")
+ax.set_xticks(list(xs)); ax.set_xticklabels([m[0] for m in models], fontsize=10)
+ax.set_ylabel("gene families at the root  (LACA genome size)", fontsize=11.5)
+ax.set_title("Reconstructed last archaeal common ancestor genome size\n"
+             f"under three models  ({F:,} gene families analysed)", fontsize=12)
+ax.set_ylim(0, max(m[1] for m in models) * 1.18)
 ax.spines[["top", "right"]].set_visible(False)
 ax.grid(axis="y", alpha=0.25)
-fig.tight_layout()
-fig.savefig(out, dpi=150, bbox_inches="tight")
-print(f"wrote {out}")
+# annotate the two contrasts
+y = max(m[1] for m in models) * 1.10
+ax.annotate("", xy=(1, y), xytext=(0, y), arrowprops=dict(arrowstyle="<->", color="0.4"))
+ax.text(0.5, y * 1.005, "origination", ha="center", fontsize=9, color="0.35", style="italic")
+ax.annotate("", xy=(2, y), xytext=(1, y), arrowprops=dict(arrowstyle="<->", color="0.4"))
+ax.text(1.5, y * 1.005, "rate granularity", ha="center", fontsize=9, color="0.35", style="italic")
+fig.tight_layout(); fig.savefig(out, dpi=150, bbox_inches="tight")
+print(f"wrote {out}  ({[m[1] for m in models]})")

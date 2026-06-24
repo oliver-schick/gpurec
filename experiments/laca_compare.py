@@ -121,36 +121,49 @@ def main():
     theta_ax = torch.log2(rate_branch.clamp_min(1e-10)).to(device=device, dtype=dtype)
     o = orig_branch.to(device=device, dtype=dtype).clamp_min(1e-12)
     log_pO_ax = torch.log2(o / o.sum())
-    print(f"[2/2] gpurec @ AleRax DTL_br1_O rates @ {root} ...", flush=True)
+    print(f"[2/3] gpurec @ AleRax DTL_br1_O (non-uniform clade O) @ {root} ...", flush=True)
     pp_ax = _pp_root(theta_ax, log_pO_ax, root_branch, sp_gpu, anc, urm, fams,
                      rc_all, leaf_E, leaf_obs_log, device, dtype)
+
+    # (3) gpurec @ AleRax DTL_br2 rates -- clade DTL with UNIFORM origination (no O column)
+    mdir2 = BASE / "DTL_br2" / f"Undine_C60_{root}root"
+    mp2 = mdir2 / "model_parameters" / "model_parameters.txt"
+    atree2 = mdir2 / "species_trees" / "starting_species_tree.newick"
+    atree2 = str(atree2) if atree2.exists() else str(tree_path)
+    rate_branch2, _o2, _ = branch_params_from_alerax(sp, atree2, str(mp2))
+    theta_uni = torch.log2(rate_branch2.clamp_min(1e-10)).to(device=device, dtype=dtype)
+    log_pO_uni = torch.full((S,), -math.log2(S), dtype=dtype, device=device)   # UNIFORM O
+    print(f"[3/3] gpurec @ AleRax DTL_br2 (uniform clade O) @ {root} ...", flush=True)
+    pp_uni = _pp_root(theta_uni, log_pO_uni, root_branch, sp_gpu, anc, urm, fams,
+                      rc_all, leaf_E, leaf_obs_log, device, dtype)
 
     thr = args.thr
     R_full = {i for i, p in enumerate(pp_full) if p >= thr}
     R_ax = {i for i, p in enumerate(pp_ax) if p >= thr}
+    R_uni = {i for i, p in enumerate(pp_uni) if p >= thr}
     inter = R_full & R_ax; union = R_full | R_ax
     jac = len(inter) / len(union) if union else float("nan")
-    exp_full = sum(pp_full); exp_ax = sum(pp_ax)
-    # pearson of per-family pp
+    exp_full = sum(pp_full); exp_ax = sum(pp_ax); exp_uni = sum(pp_uni)
     n = len(pp_full); mf = exp_full / n; ma = exp_ax / n
     cov = sum((pp_full[i] - mf) * (pp_ax[i] - ma) for i in range(n))
     vf = sum((pp_full[i] - mf) ** 2 for i in range(n)); va = sum((pp_ax[i] - ma) ** 2 for i in range(n))
     pear = cov / math.sqrt(vf * va) if vf > 0 and va > 0 else float("nan")
 
     print("\n" + "=" * 70)
-    print(f"LACA (root={root}) genome size + content consistency  [F={n} families]")
-    print(f"  gpurec FULL free per-branch : expected@root={exp_full:8.1f}  content(PP>={thr})={len(R_full)}")
-    print(f"  gpurec @ AleRax DTL_br1_O    : expected@root={exp_ax:8.1f}  content(PP>={thr})={len(R_ax)}")
-    print(f"  --- gene content overlap ---")
-    print(f"  |R_full|={len(R_full)}  |R_alerax|={len(R_ax)}  inter={len(inter)}  union={len(union)}")
-    print(f"  JACCARD(R_full, R_alerax) = {jac:.3f}")
-    print(f"  per-family PP(origin@root) Pearson r = {pear:.4f}")
+    print(f"LACA (root={root}) genome size, 3 models  [F={n}, PP>={thr}]")
+    print(f"  uniform clade     (DTL_br2,   uniform O): expected@root={exp_uni:8.1f}  content={len(R_uni)}")
+    print(f"  non-uniform clade (DTL_br1_O, fitted O) : expected@root={exp_ax:8.1f}  content={len(R_ax)}")
+    print(f"  branchwise        (FULLbasin, fitted O) : expected@root={exp_full:8.1f}  content={len(R_full)}")
+    print(f"  JACCARD(branchwise, non-uniform clade) = {jac:.3f}   per-family PP r = {pear:.4f}")
     if args.out:
-        out = dict(root=root, F=n, expected_full=exp_full, expected_alerax=exp_ax,
-                   content_full=len(R_full), content_alerax=len(R_ax),
-                   inter=len(inter), union=len(union), jaccard=jac, pearson_pp=pear,
-                   root_families_full=[names[i] for i in sorted(R_full)],
-                   root_families_alerax=[names[i] for i in sorted(R_ax)])
+        out = dict(root=root, F=n, thr=thr,
+                   uniform_clade=dict(expected=exp_uni, content=len(R_uni)),
+                   nonuniform_clade=dict(expected=exp_ax, content=len(R_ax)),
+                   branchwise=dict(expected=exp_full, content=len(R_full)),
+                   jaccard_bw_nonuni=jac, pearson_pp=pear,
+                   root_families_branchwise=[names[i] for i in sorted(R_full)],
+                   root_families_nonuniform=[names[i] for i in sorted(R_ax)],
+                   root_families_uniform=[names[i] for i in sorted(R_uni)])
         Path(args.out).write_text(json.dumps(out, indent=2))
         print(f"  wrote {args.out}")
     return 0
