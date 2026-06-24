@@ -1,0 +1,86 @@
+\documentclass[11pt]{article}
+\usepackage[margin=0.9in]{geometry}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{microtype}
+\pagestyle{empty}
+\setlength{\parskip}{0.4em}
+
+\begin{document}
+
+\begin{center}
+{\large\bfseries Branch-wise versus clade-grouped gene-family evolution on the archaeal tree}\\[2pt]
+{\small Reconciliation of 7{,}059 gene families on the 257-taxon archaeal species tree, Euryarchaeota root}
+\end{center}
+
+\noindent
+Reconciling each gene family against the species tree under a duplication--transfer--loss
+(DTL) model requires a choice of how finely rates may vary across the tree. We compared two
+parameterisations: the \emph{clade-grouped} model, in which all branches of a major clade
+share a single set of duplication, loss and transfer rates (and origination weight), and a
+\emph{fully branch-wise} model, in which every branch carries its own rates. As a control,
+our GPU reconciliation engine reproduces the reference per-family likelihoods to within
+Pearson $r=0.999998$, so the comparison reflects the rate model, not the implementation.
+
+Relaxing the clade constraint improves the fit by $\sim$10{,}900 log-likelihood units
+(Table~\ref{tab:cmp}) while leaving the inferred root unchanged: Euryarchaeota remains the
+maximum-likelihood rooting under both models. The improvement is not overfitting --- on gene
+families withheld from rate estimation, the branch-wise model still predicts better than the
+clade-grouped model ($+1{,}556$ units; $+0.44$ per family), so the additional parameters
+capture real among-branch rate variation.
+
+That variation has a clear and interpretable structure (Figure~\ref{fig:rates}). Duplication
+and transfer rates are essentially \emph{clade-constant}: within each named clade the
+per-branch estimates scarcely depart from a single value (clade membership explains
+$R^2\!\approx\!0.94$ of their variance). Loss is markedly less clade-structured
+($R^2\!\approx\!0.38$), with the largest departures along the deep backbone rather than within
+the well-sampled clades. Biologically, gene gain (duplication, transfer) is well summarised by
+one rate per clade, whereas gene loss is more branch-idiosyncratic.
+
+The reconstructed ancestral genome is robust to this added flexibility
+(Figure~\ref{fig:laca}). Of the 7{,}059 families, the branch-wise model assigns 903 to the
+last archaeal common ancestor and the clade-grouped model 772; 722 are common to both (Jaccard
+$0.76$), and the per-family probabilities of origination at the root agree closely
+($r=0.96$). The two models therefore recover essentially the same ancestral gene set, the
+branch-wise model reconstructing a modestly larger genome.
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{lrrl}
+\toprule
+rate model & free params & data $\log L$ (nats) & AU 0.05 root set \\
+\midrule
+clade-grouped (one D/L/T per clade) & $\sim$70  & $-1{,}642{,}425$ & \{Euryarchaeota, MHH\} (region) \\
+fully branch-wise (per branch)      & $\sim$2{,}000 & $\mathbf{-1{,}631{,}537}$ & \{Euryarchaeota\} \\
+\midrule
+\multicolumn{4}{l}{\footnotesize branch-wise $-$ grouped: $+10{,}888$ in-sample; $+1{,}556$ on held-out families (cross-validated, not overfitting).}\\
+\bottomrule
+\end{tabular}
+\caption{Model comparison at the Euryarchaeota root. Both models recover Euryarchaeota as the
+maximum-likelihood root; the approximately-unbiased (AU) test supports a \{Euryarchaeota, MHH\}
+region under the parsimonious clade-grouped model and narrows to Euryarchaeota alone under the
+richer branch-wise model --- an over-confidence we attribute to model richness, not to stronger
+evidence.}
+\label{tab:cmp}
+\end{table}
+
+\begin{figure}[h]\centering
+\includegraphics[width=0.96\textwidth]{rate_violin_v2_bigtree_Eury.png}
+\caption{Per-clade duplication, loss and transfer rates (log scale, events per branch):
+the spread of free per-branch rates within each clade (violins) against the single
+clade-grouped rate (diamonds). Duplication and transfer are clade-constant
+($R^2\!\approx\!0.94$); loss departs from clade-constancy, chiefly along the backbone
+($R^2\!\approx\!0.38$).}
+\label{fig:rates}
+\end{figure}
+
+\begin{figure}[h]\centering
+\includegraphics[width=0.5\textwidth]{laca_families_bigtree_Eury.png}
+\caption{Reconstructed last archaeal common ancestor (LACA) gene content: 903 families under
+the branch-wise model vs.\ 772 under clade-grouped rates, 722 shared (Jaccard 0.76), of 7{,}059
+analysed.}
+\label{fig:laca}
+\end{figure}
+
+\end{document}
