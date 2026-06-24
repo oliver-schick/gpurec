@@ -45,12 +45,16 @@ $R^2\!\approx\!0.94$ of their variance). Loss is markedly less clade-structured
 by clade identity. Biologically, gene gain (duplication, transfer) is well summarised by one
 rate per clade, whereas gene loss is more branch-idiosyncratic.
 
-The reconstructed ancestral genome is robust to this added flexibility
-(Figure~\ref{fig:laca}). Of the 7{,}059 families, the branch-wise model assigns 903 to the
-last archaeal common ancestor and the clade-grouped model 772; 722 are common to both (Jaccard
-$0.76$), and the per-family probabilities of origination at the root agree closely
-($r=0.96$). The two models therefore recover essentially the same ancestral gene set, the
-branch-wise model reconstructing a modestly larger genome.
+The reconstructed ancestral genome depends far more on the origination treatment than on the
+rate granularity (Figure~\ref{fig:laca}). Of the 7{,}059 families, a model with \emph{uniform}
+origination places only 96 at the last archaeal common ancestor --- a flat origination prior
+makes the root no likelier a birthplace than any other branch. Allowing origination to be
+\emph{fitted} raises this almost eight-fold --- to 772 under clade-grouped rates and 903 under
+the branch-wise model --- as gene births concentrate near the root. The further step from
+clade-grouped to branch-wise rates adds comparatively little (772 to 903; the two share 722
+families, Jaccard $0.76$, with per-family root-origination probabilities correlated $r=0.96$).
+So the size of the inferred ancestral genome is set chiefly by the origination model, and the
+branch-wise rates refine rather than reshape it.
 
 \begin{table}[h]
 \centering\small
@@ -111,10 +115,12 @@ gain (duplication, transfer) is well summarised by one rate per clade; gene loss
 \end{figure}
 
 \begin{figure}[h]\centering
-\includegraphics[width=0.5\textwidth]{laca_families_bigtree_Eury.png}
-\caption{Reconstructed last archaeal common ancestor (LACA) gene content: 903 families under
-the branch-wise model vs.\ 772 under clade-grouped rates, 722 shared (Jaccard 0.76), of 7{,}059
-analysed.}
+\includegraphics[width=0.62\textwidth]{laca_families3_bigtree_Eury.png}
+\caption{Reconstructed LACA genome size under three models, isolating the two effects. Uniform
+origination places only 96 families at the root; fitting origination with the same
+clade-grouped rates raises it to 772 (the origination effect), and the branch-wise rates add a
+further 131 to 903 (the rate-granularity effect). Origination dominates, rate granularity
+refines. (Of 7{,}059 families.)}
 \label{fig:laca}
 \end{figure}
 
