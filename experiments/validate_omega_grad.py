@@ -124,8 +124,22 @@ def main():
         grad_tmu_total = grad_tmu_total + gtmu
     domega = torch.autograd.grad(tmu, omega_req, grad_outputs=grad_tmu_total)[0].detach()
 
-    # central FD on a sample of omega entries
+    # localize: FD on individual tmu[d,r] entries vs grad_tmu[d,r] directly
     eps = 1e-5
+    vd = valid.nonzero(as_tuple=False)
+    torch.manual_seed(1)
+    pick = vd[torch.randint(0, vd.shape[0], (6,))]
+    print("[entry-FD] tmu[d,r]: analytic grad_tmu vs FD")
+    for dr in pick:
+        dd, rr = int(dr[0]), int(dr[1])
+        tp = tmu.detach().clone(); tp[dd, rr] += eps
+        lp, _ = _per_family_forward(theta, tp, sh, items, device, dtype)
+        tm = tmu.detach().clone(); tm[dd, rr] -= eps
+        lm, _ = _per_family_forward(theta, tm, sh, items, device, dtype)
+        fd = (lp - lm) / (2 * eps); ana = float(grad_tmu_total[dd, rr])
+        print(f"  tmu[{dd:3d},{rr:3d}] analytic={ana:12.5e} FD={fd:12.5e} ratio={ana/fd if fd else float('nan'):.4f}")
+
+    # central FD on a sample of omega entries
     idxs = list(range(min(S, 12)))
     print(f"base logL = {logL:.8f}   S={S}")
     print(f"{'r':>3s} {'analytic':>14s} {'FD':>14s} {'rel_err':>10s}")
