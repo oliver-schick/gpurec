@@ -43,11 +43,13 @@ def _load(device, dtype, n_fam=3):
     return sh, items
 
 
-def _build_tmu(omega, valid):
-    """transfer_mat_unnormalized[d,r] = omega_r on valid recipients, -inf else (diff'able in omega)."""
+def _build_tmu(omega, valid, base_log):
+    """transfer_mat_unnormalized[d,r] = log2(Recipients_mat[d,r]) + omega_r on valid recipients,
+    -inf else. The recipient weight w_r = 2^omega_r MODULATES the donor base (so omega=0 is exactly
+    the current donor model, preserving its per-donor normalization). Differentiable in omega."""
     S = omega.shape[0]
     neg = torch.full((S, S), NEG, dtype=omega.dtype, device=omega.device)
-    return torch.where(valid, omega.unsqueeze(0).expand(S, S), neg)
+    return torch.where(valid, base_log + omega.unsqueeze(0).expand(S, S), neg)
 
 
 def _per_family_forward(theta, tmu, sh, items, device, dtype):
@@ -95,7 +97,7 @@ def main():
     tm_unnorm = torch.log2(sh["Recipients_mat"]).to(device=device, dtype=dtype)
     ld, _ = _per_family_forward(theta, tm_unnorm, sh, items, device, dtype)
     print(f"[diag] donor-model logL (tmu=log2 Recipients) = {ld}")
-    tmu0 = _build_tmu(torch.zeros(S, dtype=dtype, device=device), valid)
+    tmu0 = _build_tmu(torch.zeros(S, dtype=dtype, device=device), valid, tm_unnorm)
     l0, fwd0 = _per_family_forward(theta, tmu0, sh, items, device, dtype)
     lpS0, lpD0, lpL0, tf0, mt0, E0, _ = fwd0
     print(f"[diag] omega=0 logL = {l0}   transfer_mat finite={torch.isfinite(tf0).all().item()} "
@@ -104,7 +106,7 @@ def main():
 
     # analytic dL/d omega
     omega_req = omega.clone().requires_grad_(True)
-    tmu = _build_tmu(omega_req, valid)
+    tmu = _build_tmu(omega_req, valid, tm_unnorm)
     logL, fwd = _per_family_forward(theta, tmu.detach(), sh, items, device, dtype)
     log_pS, log_pD, log_pL, transfer_mat, mt, E_out, perfam = fwd
     grad_tmu_total = torch.zeros(S, S, dtype=dtype, device=device)
@@ -130,9 +132,9 @@ def main():
     maxrel = 0.0
     for r in idxs:
         op = omega.clone(); op[r] += eps
-        lp, _ = _per_family_forward(theta, _build_tmu(op, valid), sh, items, device, dtype)
+        lp, _ = _per_family_forward(theta, _build_tmu(op, valid, tm_unnorm), sh, items, device, dtype)
         om = omega.clone(); om[r] -= eps
-        lm, _ = _per_family_forward(theta, _build_tmu(om, valid), sh, items, device, dtype)
+        lm, _ = _per_family_forward(theta, _build_tmu(om, valid, tm_unnorm), sh, items, device, dtype)
         fd = (lp - lm) / (2 * eps); ana = float(domega[r])
         rel = abs(ana - fd) / max(abs(fd), 1e-7); maxrel = max(maxrel, rel)
         print(f"{r:3d} {ana:14.6e} {fd:14.6e} {rel:10.2e}")
