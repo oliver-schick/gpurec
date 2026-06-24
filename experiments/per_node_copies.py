@@ -145,8 +145,11 @@ def main():
     lpS = log_pS.cpu().numpy(); lpD = log_pD.cpu().numpy(); lpO = log_pO.cpu().numpy()
 
     presence = np.zeros((F, S)); copies = np.zeros((F, S)); orig_root = np.zeros(F)
+    copies_all = np.zeros((F, S))                     # diagnostic: OLD all-event count
+    obs_genes = np.zeros(S); obs_fam = np.zeros(S)    # observed leaf gene/family counts (ground truth)
     pp_root_an_sum = 0.0
     rng = np.random.default_rng(args.seed)
+    ALL_EV = {"O", "D", "S", "T", "SL", "TL", "leaf"}
     # Copy number at species branch s = number of gene copies (lineages) present on s.
     # Count one event per copy: the EXIT event by which a lineage leaves/terminates on s
     # -- S, SL (speciate down), leaf (terminal), T, TL (transfer out). Do NOT count O (a
@@ -172,6 +175,10 @@ def main():
             mx = Pi_f.max(axis=1, keepdims=True)
             Pibar_f = np.log2(np.exp2(Pi_f - mx) @ transfer_lin.T) + mx
             splits_of, cls, root_id = _decode_family(fam)
+            for L in cls.values():                    # observed ground truth from the data
+                obs_genes[L] += 1
+            for L in set(cls.values()):
+                obs_fam[L] += 1
             fwd = FamilyForward(Pi=Pi_f, Pibar=Pibar_f, E=E_np, Ebar=Ebar_np, log_pS=lpS, log_pD=lpD,
                                 transfer_mat=transfer_lin, log_pO=lpO, sp_child1=sp_c1, sp_child2=sp_c2,
                                 clade_leaf_species=cls, clade_leaf_label={}, splits_of=splits_of,
@@ -180,8 +187,11 @@ def main():
                 for s in sc.occupied:
                     presence[f, s] += 1
                 for ev in sc.events:
-                    if ev.type in COPY_EXIT and 0 <= ev.species < S:
-                        copies[f, ev.species] += 1
+                    if 0 <= ev.species < S:
+                        if ev.type in COPY_EXIT:
+                            copies[f, ev.species] += 1
+                        if ev.type in ALL_EV:
+                            copies_all[f, ev.species] += 1
                 if sc.events and sc.events[0].species == root_branch:
                     orig_root[f] += 1
             rr = lpO + Pi_b[int(rc_bn[j])]                      # analytic origination@root (validation)
@@ -189,6 +199,23 @@ def main():
             pp_root_an_sum += float(np.exp2(rr[root_branch]))
         print(f"  {min(i0 + CHUNK, F)}/{F} families sampled", flush=True)
     presence /= args.n_samples; copies /= args.n_samples; orig_root /= args.n_samples
+    copies_all /= args.n_samples
+
+    # GROUND-TRUTH validation at extant leaves (parameter-INDEPENDENT): every reconciliation
+    # must place each observed gene at its observed leaf, so sampled copies at a leaf MUST
+    # equal the observed gene count there. This pins down whether copy-counting is correct.
+    leaves = [s for s in range(S) if sp_c1[s] == S]
+    og = float(sum(obs_genes[L] for L in leaves)); ofam = float(sum(obs_fam[L] for L in leaves))
+    snew = float(sum(copies[:, L].sum() for L in leaves))
+    sold = float(sum(copies_all[:, L].sum() for L in leaves))
+    spres = float(sum(presence[:, L].sum() for L in leaves))
+    print("\n" + "=" * 60)
+    print("LEAF GROUND TRUTH (sampled must == observed at extant tips):")
+    print(f"  observed genes at leaves   = {og:.0f}")
+    print(f"  sampled copies (NEW, exits)= {snew:.1f}   ratio {snew/og:.3f}  <- should be ~1.000")
+    print(f"  sampled copies (OLD, all)  = {sold:.1f}   ratio {sold/og:.3f}  <- the bug")
+    print(f"  observed families at leaves= {ofam:.0f}")
+    print(f"  sampled presence at leaves = {spres:.1f}   ratio {spres/ofam:.3f}")
 
     # VALIDATION (self-contained): sampled vs analytic origination-at-root
     samp_root = float(orig_root.sum())
