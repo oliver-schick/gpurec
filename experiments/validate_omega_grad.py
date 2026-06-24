@@ -117,7 +117,7 @@ def main():
             E_star=E_out["E"], E_s1=E_out["E_s1"], E_s2=E_out["E_s2"], Ebar=E_out["E_bar"],
             log_pS=log_pS, log_pD=log_pD, log_pL=log_pL, max_transfer_mat=mt,
             root_clade_ids_perm=wl["root_clade_ids"], theta=theta, unnorm_row_max=unnorm_row_max,
-            specieswise=True, device=device, dtype=dtype, neumann_terms=4, use_pruning=False,
+            specieswise=True, device=device, dtype=dtype, neumann_terms=40, use_pruning=False,
             cg_tol=1e-12, cg_maxiter=2000, pibar_mode="dense",
             transfer_mat=transfer_mat, transfer_mat_unnormalized=tmu.detach(),
             return_grad_tmu=True)
