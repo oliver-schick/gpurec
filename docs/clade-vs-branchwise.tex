@@ -56,36 +56,37 @@ branch-wise model reconstructing a modestly larger genome.
 \centering\small
 \begin{tabular}{lrrcc}
 \toprule
- & \multicolumn{2}{c}{branch-wise model} & branch-wise & clade-grouped \\
-candidate root & $\log L$ (nats) & $\Delta$ & AU & AU \\
+ & clade-grouped & branch-wise & clade-grouped & branch-wise \\
+candidate root & $\log L$ & $\log L$ & AU & AU \\
 \midrule
-Euryarchaeota    & $-1{,}631{,}537$ & $0$         & $\mathbf{0.63}$ & $\mathbf{0.64}$ \\
-HalobacThermopl  & $-1{,}635{,}105$ & $-3{,}568$  & 0.00 & $<$0.05 \\
-TackA            & $-1{,}635{,}514$ & $-3{,}977$  & 0.00 & $<$0.05 \\
-MHH              & $-1{,}637{,}704$ & $-6{,}167$  & 0.00 & $\mathbf{0.49}$ \\
-Kor              & $-1{,}637{,}909$ & $-6{,}372$  & 0.00 & $<$0.05 \\
-TACA             & $-1{,}638{,}428$ & $-6{,}891$  & 0.00 & $<$0.05 \\
-DPANN            & $-1{,}639{,}707$ & $-8{,}170$  & 0.00 & $<$0.05 \\
-TAC              & $-1{,}639{,}970$ & $-8{,}433$  & 0.00 & $<$0.05 \\
-Asgard           & $-1{,}641{,}098$ & $-9{,}561$  & 0.00 & $<$0.05 \\
-MicraDia         & $-1{,}642{,}346$ & $-10{,}809$ & 0.00 & $<$0.05 \\
-AMD              & $-1{,}642{,}470$ & $-10{,}933$ & 0.00 & $<$0.05 \\
-UndineClu2       & $-1{,}643{,}241$ & $-11{,}704$ & 0.00 & $<$0.05 \\
-Alti             & $-1{,}643{,}347$ & $-11{,}810$ & 0.00 & $<$0.05 \\
-Cluster2         & $-1{,}643{,}727$ & $-12{,}190$ & 0.00 & $<$0.05 \\
-Micra5           & $-1{,}644{,}060$ & $-12{,}523$ & 0.00 & $<$0.05 \\
+Euryarchaeota    & $-1{,}642{,}425$ & $\mathbf{-1{,}631{,}537}$ & $\mathbf{0.63}$ & $\mathbf{0.63}$ \\
+HalobacThermopl  & $-1{,}647{,}830$ & $-1{,}635{,}105$ & $<$0.05 & 0.00 \\
+TackA            & $-1{,}643{,}485$ & $-1{,}635{,}514$ & $<$0.05 & 0.00 \\
+MHH              & $-1{,}649{,}534$ & $-1{,}637{,}704$ & $<$0.05 & 0.00 \\
+Kor              & $-1{,}647{,}973$ & $-1{,}637{,}909$ & $<$0.05 & 0.00 \\
+TACA             & $-1{,}648{,}397$ & $-1{,}638{,}428$ & $<$0.05 & 0.00 \\
+DPANN            & $-1{,}644{,}330$ & $-1{,}639{,}707$ & $<$0.05 & 0.00 \\
+TAC              & $-1{,}648{,}893$ & $-1{,}639{,}970$ & $<$0.05 & 0.00 \\
+Asgard           & $-1{,}649{,}022$ & $-1{,}641{,}098$ & $<$0.05 & 0.00 \\
+MicraDia         & $-1{,}646{,}301$ & $-1{,}642{,}346$ & $<$0.05 & 0.00 \\
+AMD              & $-1{,}647{,}588$ & $-1{,}642{,}470$ & $<$0.05 & 0.00 \\
+UndineClu2       & $-1{,}647{,}958$ & $-1{,}643{,}241$ & $<$0.05 & 0.00 \\
+Alti             & $-1{,}648{,}300$ & $-1{,}643{,}347$ & $<$0.05 & 0.00 \\
+Cluster2         & $-1{,}648{,}352$ & $-1{,}643{,}727$ & $<$0.05 & 0.00 \\
+Micra5           & $-1{,}648{,}861$ & $-1{,}644{,}060$ & $<$0.05 & 0.00 \\
 \bottomrule
 \end{tabular}
-\caption{All 15 candidate roots: branch-wise log-likelihoods (per-branch model), their
-difference from the best, and the approximately-unbiased (AU) support under the branch-wise
-model and under the parsimonious clade-grouped model. Both models place Euryarchaeota first.
-The clade-grouped model additionally retains MHH (AU 0.49) --- the \{Euryarchaeota, MHH\}
-region --- whereas the branch-wise model separates the roots strongly and supports
-Euryarchaeota alone; we read the latter's sharpness as model richness, not stronger evidence.
-Whole-dataset fit: clade-grouped $-1{,}642{,}425$ vs branch-wise $-1{,}631{,}537$
-($+10{,}888$; held-out cross-validation $+1{,}556$, not overfitting; Figure~\ref{fig:cv}). AU
-values are scale-invariant bootstrap supports; the listed branch-wise $\log L$ are on
-gpurec's marginal-likelihood scale.}
+\caption{All 15 candidate roots under matched origination (both models include the origination
+term): clade-grouped versus fully branch-wise per-branch rates. Log-likelihoods are on gpurec's
+marginal scale, directly comparable, and the approximately-unbiased (AU) supports are
+scale-invariant bootstrap values. Both models place Euryarchaeota first and reject every
+alternative root (AU $<0.05$); the branch-wise model fits better at every root (by $+10{,}888$
+at Euryarchaeota; held-out cross-validation $+1{,}556$, Figure~\ref{fig:cv}). So the per-branch
+rates improve the fit throughout without changing the rooting. (AleRax's parsimonious,
+BIC-best model omits origination and instead supports an \{Euryarchaeota, MHH\} region; it is
+the \emph{origination} term --- present in both models here --- that resolves the rooting to
+Euryarchaeota, not the rate granularity. The two models also order the lower roots somewhat
+differently, reflecting that neither resolves them strongly.)}
 \label{tab:roots}
 \end{table}
 

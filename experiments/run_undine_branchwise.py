@@ -162,6 +162,10 @@ def _run(args, data_dir: Path):
         if not ale_paths:
             raise SystemExit(f"no .ale files under {data_dir / args.ccp_dir} "
                              f"(run ALEobserve on the ufboots first)")
+    if getattr(args, "shuffle_seed", -1) >= 0:                  # random train/test split
+        import random as _rnd
+        _rnd.Random(args.shuffle_seed).shuffle(ale_paths)
+        print(f"      SHUFFLED .ale order (seed={args.shuffle_seed}) before --families cut")
     if not torch.cuda.is_available():
         raise SystemExit("CUDA required for optimization (run on the A100). "
                          "Use --preflight for the CPU data-wiring check.")
@@ -592,6 +596,9 @@ def _parse_args(argv=None):
     p.add_argument("--min-species", type=int, default=1)
     p.add_argument("--families", type=int, default=0,
                    help="limit #families (0=all; for quick tests)")
+    p.add_argument("--shuffle-seed", type=int, default=-1,
+                   help="shuffle the .ale family order with this seed BEFORE the --families "
+                        "cut, for a random size-balanced train/test split (-1=sorted order).")
     p.add_argument("--steps", type=int, default=200)
     p.add_argument("--optimizer", default="lbfgs", choices=["lbfgs", "adam", "sgd"])
     p.add_argument("--pibar-mode", default="uniform", choices=["uniform", "dense", "topk"])

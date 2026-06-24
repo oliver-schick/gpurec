@@ -69,6 +69,9 @@ def main():
     ap.add_argument("--free", required=True)
     ap.add_argument("--grouped", required=True)
     ap.add_argument("--fm-mode", default="e-only")
+    ap.add_argument("--shuffle-seed", type=int, default=-1,
+                    help="shuffle .ale order with this seed (MUST match the fit's --shuffle-seed) "
+                         "so the [:train_n] / [train_n:] split aligns with the random fit split.")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
     if not torch.cuda.is_available():
@@ -77,7 +80,11 @@ def main():
 
     tree = DD / "4_species_tree" / f"Undine_C60_{args.root}root_short_name.nw"
     sp = _load_species_helpers(str(tree)); S = int(sp["S"]); s2i = sp["species_name_to_index"]
-    fams, names = _load_families_named(ALE, s2i, min_species=1, dtype=dtype)
+    ale = list(ALE)
+    if args.shuffle_seed >= 0:
+        import random as _rnd
+        _rnd.Random(args.shuffle_seed).shuffle(ale)   # same seed as the fit -> aligned split
+    fams, names = _load_families_named(ale, s2i, min_species=1, dtype=dtype)
     sp_gpu, anc = _sp_helpers_for_uniform(sp, device, dtype)
     urm = torch.log2(sp["Recipients_mat"]).max(dim=-1).values.to(device=device, dtype=dtype)
     leaf_E = None
