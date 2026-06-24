@@ -86,10 +86,21 @@ def main():
     tm_unnorm = torch.log2(sh["Recipients_mat"]).to(device=device, dtype=dtype)
     unnorm_row_max = tm_unnorm.max(dim=-1).values
 
-    base = torch.log2(torch.tensor([0.08, 0.20, 0.10], dtype=dtype, device=device))
+    base = torch.log2(torch.tensor([0.05, 0.05, 0.05], dtype=dtype, device=device))
     theta = base.unsqueeze(0).expand(S, -1).contiguous()
     torch.manual_seed(0)
-    omega = (0.3 * torch.randn(S, dtype=dtype, device=device))               # nontrivial recipient weights
+    omega = (0.1 * torch.randn(S, dtype=dtype, device=device))               # nontrivial recipient weights
+
+    # --- diagnostics: donor baseline (omega=0 == log2(Recipients_mat) for binary valid) + finiteness
+    tm_unnorm = torch.log2(sh["Recipients_mat"]).to(device=device, dtype=dtype)
+    ld, _ = _per_family_forward(theta, tm_unnorm, sh, items, device, dtype)
+    print(f"[diag] donor-model logL (tmu=log2 Recipients) = {ld}")
+    tmu0 = _build_tmu(torch.zeros(S, dtype=dtype, device=device), valid)
+    l0, fwd0 = _per_family_forward(theta, tmu0, sh, items, device, dtype)
+    lpS0, lpD0, lpL0, tf0, mt0, E0, _ = fwd0
+    print(f"[diag] omega=0 logL = {l0}   transfer_mat finite={torch.isfinite(tf0).all().item()} "
+          f"mt finite={torch.isfinite(mt0).all().item()} E finite={torch.isfinite(E0['E']).all().item()} "
+          f"E.max={float(E0['E'].max()):.3f}")
 
     # analytic dL/d omega
     omega_req = omega.clone().requires_grad_(True)
