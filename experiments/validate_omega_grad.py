@@ -10,16 +10,13 @@ near-exact path). Run on a CUDA node (the Triton wave forward needs it).
   python experiments/validate_omega_grad.py
 """
 from __future__ import annotations
-import math, sys
+import glob, math, sys
 from pathlib import Path
 import torch
 
 _ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(_ROOT / "tests" / "gradients"))
-from test_fd_all_modes import (  # noqa: E402  (reuse the loaders/forward helpers)
-    _ROOT as _TROOT)  # noqa: F401
+sys.path.insert(0, str(_ROOT / "experiments"))
 
-from gpurec.core.preprocess_cpp import _load_extension                      # noqa: E402
 from gpurec.core.extract_parameters import extract_parameters               # noqa: E402
 from gpurec.core.likelihood import E_fixed_point, compute_log_likelihood    # noqa: E402
 from gpurec.core.forward import Pi_wave_forward                             # noqa: E402
@@ -27,31 +24,22 @@ from gpurec.core.scheduling import compute_clade_waves                      # no
 from gpurec.core.batching import collate_gene_families, collate_wave, build_wave_layout  # noqa: E402
 from gpurec.optimization.implicit_grad import implicit_grad_loglik_vjp_wave  # noqa: E402
 
-_INV = 1.0 / math.log(2.0)
 NEG = float("-inf")
+_WDD = Path("/work/SzollosiU/gergely-szollosi/williams_run/data/3_Reconciliation/Williams_et_al_2017")
 
 
-def _load(device, dtype):
-    ext = _load_extension()
-    data_dir = _ROOT / "tests" / "data" / "test_trees_20"
-    sp_path = str(data_dir / "sp.nwk")
-    gene_paths = sorted(data_dir.glob("g_*.nwk"))[:3]
-    items, sr = [], None
-    for gp in gene_paths:
-        raw = ext.preprocess(sp_path, [str(gp)])
-        sr = sr or raw["species"]; cr = raw["ccp"]
-        ch = {k: cr[k] for k in ("split_leftrights_sorted", "seg_parent_ids", "ptr_ge2") if k in cr}
-        ch["log_split_probs_sorted"] = cr["log_split_probs_sorted"].to(dtype=dtype) * _INV
-        for k in ("num_segs_ge2", "num_segs_eq1", "end_rows_ge2", "C", "N_splits"):
-            ch[k] = int(cr[k])
-        if "split_parents_sorted" in cr:
-            ch["split_parents_sorted"] = cr["split_parents_sorted"]
-        items.append({"ccp": ch, "leaf_row_index": raw["leaf_row_index"].long(),
-                      "leaf_col_index": raw["leaf_col_index"].long(),
-                      "root_clade_id": int(cr["root_clade_id"])})
-    sh = {"S": int(sr["S"]), "names": sr["names"],
-          "s_P_indexes": sr["s_P_indexes"].to(device), "s_C12_indexes": sr["s_C12_indexes"].to(device),
-          "Recipients_mat": sr["Recipients_mat"].to(dtype=dtype, device=device)}
+def _load(device, dtype, n_fam=3):
+    from run_williams_branchwise import _load_species_helpers, _load_families
+    tree = sorted(glob.glob(str(_WDD / "rooted_phylogeny" / "*")))[0]
+    sp = _load_species_helpers(tree); s2i = sp["species_name_to_index"]
+    ale = sorted(p for p in glob.glob(str(_WDD / "ccps" / "*.ale")) if not Path(p).name.startswith("._"))
+    fams, _ = _load_families(ale, s2i, min_species=1, dtype=dtype, limit=n_fam)
+    sh = {"S": int(sp["S"]), "names": sp.get("names"),
+          "s_P_indexes": sp["s_P_indexes"].to(device), "s_C12_indexes": sp["s_C12_indexes"].to(device),
+          "Recipients_mat": sp["Recipients_mat"].to(dtype=dtype, device=device)}
+    items = [{"ccp": f["ccp_helpers"], "leaf_row_index": f["leaf_row_index"],
+              "leaf_col_index": f["leaf_col_index"], "root_clade_id": int(f["root_clade_id"])}
+             for f in fams]
     return sh, items
 
 
