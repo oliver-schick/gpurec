@@ -367,13 +367,20 @@ the near-tie or SGA basin:
   \item fused-lasso (TV) annealing --- regularises the DTL, not the (bistable) origination,
     and sticks at the near-tie;
   \item structured-$O$ seed ($\omega\propto-\text{depth}$) --- diffuses straight back to the
-    near-tie.
+    near-tie;
+  \item \emph{root-mass origination-prior homotopy} (the prior annealed strong$\to$zero) ---
+    the root-mass prior over-concentrates origination onto the \emph{single root branch}, a
+    degenerate fit ($\log L\approx-1{,}737$k, below even the cold SGA stall), and the anneal
+    does not recover (the optimiser freezes at the degenerate point). The target is wrong:
+    the deep basin's origination is a \emph{cluster of branches near} the root, not the root
+    branch itself.
 \end{itemize}
 The deep basin needs the structured $O$ \emph{and} the matching DTL together; an
-initialisation-independent route to it is unsolved. The most promising untried idea --- now
-running --- is a \emph{deep-origination prior homotopy}: impose a strong root-region
-origination prior to \emph{place} the optimiser in the deep basin, then anneal that prior to
-zero, so the final unconstrained optimum is the one near the deep basin. This is the
-directionally-correct counterpart of the anti-concentration barrier that failed.
+initialisation-independent route to it remains unsolved. The next idea is a \emph{region}
+(depth-weighted) origination prior, annealed, that pulls origination toward the near-root
+\emph{neighbourhood} of shallow branches --- where the deep-basin mass actually sits ---
+rather than onto the single root branch, calibrated to concentrate without collapsing the
+fit. Cold-start basin-finding is, for now, an open problem; warm-starting (Steps~1--2)
+remains the reliable route to the global optimum.
 
 \end{document}
