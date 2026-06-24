@@ -150,13 +150,18 @@ def main():
     pp_root_an_sum = 0.0
     rng = np.random.default_rng(args.seed)
     ALL_EV = {"O", "D", "S", "T", "SL", "TL", "leaf"}
-    # Copy number at species branch s = number of gene copies (lineages) present on s.
-    # Count one event per copy: the EXIT event by which a lineage leaves/terminates on s
-    # -- S, SL (speciate down), leaf (terminal), T, TL (transfer out). Do NOT count O (a
-    # birth, not a copy) or D (an INTERNAL duplication node: 1->2, both children continue
-    # at s and are counted by their own exits). Counting all events would give ~2k-1 per k
-    # copies (the k-1 internal D nodes + the O), inflating copy number ~2x.
-    COPY_EXIT = {"S", "SL", "T", "TL", "leaf"}
+    # Genes at species node s = AleRax's SCount + SLCount + LeafCount (see GeneRaxCore
+    # Scenario::gatherReconciliationStatistics): the gene lineages that are AT node s --
+    # they speciate (S), speciate-with-loss (SL), or are an observed leaf there. NOT:
+    #   O  -- a birth event, not a copy
+    #   D  -- an internal duplication node (1->2, both children continue at s; counted by
+    #         their own S/SL/leaf exits)
+    #   T  -- the source lineage STAYS at s and is counted again at its own later S/SL/leaf;
+    #         the received copy is counted at the recipient. (T is an internal branching.)
+    #   TL -- the lineage MOVES off s to the recipient (counted there); it is not at node s.
+    # This is parameter-independent-validated: at an extant leaf (no children -> no S/SL)
+    # it reduces to LeafCount == the observed number of genes.
+    COPY_EXIT = {"S", "SL", "leaf"}
     CHUNK = 250                                       # batch the DENSE forward (avoid all-families OOM)
     for i0 in range(0, F, CHUNK):
         batch = fams[i0:i0 + CHUNK]
