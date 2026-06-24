@@ -65,6 +65,7 @@ def implicit_grad_loglik_vjp_wave(
     leaf_E: Optional[torch.Tensor] = None,
     leaf_obs_log=_PI_LEAF_UNSET,
     log_pO: Optional[torch.Tensor] = None,
+    return_grad_tmu: bool = False,
 ):
     """Compute ∇θ logL using wave-decomposed backward pass + E adjoint.
 
@@ -125,7 +126,7 @@ def implicit_grad_loglik_vjp_wave(
     torch.cuda.synchronize()
     _t_pi_bwd = time.perf_counter() - _t_pi_bwd_0
 
-    grad_theta, statsG = _e_adjoint_and_theta_vjp(
+    res = _e_adjoint_and_theta_vjp(
         pi_bwd, E_star, Ebar, E_s1, E_s2,
         log_pS, log_pD, log_pL,
         max_transfer_mat, species_helpers, root_clade_ids_perm,
@@ -137,7 +138,13 @@ def implicit_grad_loglik_vjp_wave(
         ancestors_T=ancestors_T,
         leaf_E=leaf_E,
         log_pO=log_pO,
+        return_grad_tmu=return_grad_tmu,
     )
+    if return_grad_tmu:
+        grad_theta, statsG, grad_tmu = res
+        statsG.pi_bwd_time = _t_pi_bwd
+        return grad_theta, statsG, grad_tmu
+    grad_theta, statsG = res
     statsG.pi_bwd_time = _t_pi_bwd
     return grad_theta, statsG
 
@@ -156,6 +163,7 @@ def _e_adjoint_and_theta_vjp(
     transfer_mat=None, transfer_mat_unnormalized=None, ancestors_T=None,
     leaf_E=None,
     log_pO=None,
+    return_grad_tmu=False,
 ):
     """E adjoint solve + theta VJP from pre-computed Pi backward result.
 
@@ -287,11 +295,19 @@ def _e_adjoint_and_theta_vjp(
     # --- Step 3: theta gradient through extract_parameters ---
     grad_mt_total = pi_bwd['grad_max_transfer_mat'] + pi_bwd['grad_Ebar']
 
+    # Optional: also return dL/d(transfer_mat_unnormalized) (-> recipient omega in the
+    # transfer-to model). Guarded; when off the main path is byte-identical.
+    grad_tmu = None
+    _want_tmu = (return_grad_tmu and pibar_mode in ('dense', 'topk')
+                 and transfer_mat_unnormalized is not None)
+
     theta_req = theta.detach().requires_grad_(True)
+    tmu_req = (transfer_mat_unnormalized.detach().requires_grad_(True)
+               if _want_tmu else transfer_mat_unnormalized)
     with torch.enable_grad():
         if pibar_mode in ('dense', 'topk') and transfer_mat_unnormalized is not None:
             log_pS_r, log_pD_r, log_pL_r, transfer_mat_r, mt_r_raw = extract_parameters(
-                theta_req, transfer_mat_unnormalized,
+                theta_req, tmu_req,
                 genewise=genewise, specieswise=specieswise, pairwise=False,
             )
             mt_r = mt_r_raw.squeeze(-1) if mt_r_raw.ndim == 2 else mt_r_raw
@@ -314,14 +330,20 @@ def _e_adjoint_and_theta_vjp(
                 (log_pD_r * pi_bwd['grad_log_pD']).sum() +
                 (mt_r * grad_mt_total).sum()
             )
-        grad_theta_pi = torch.autograd.grad(param_loss, theta_req, retain_graph=False)[0]
+        if _want_tmu:
+            grad_theta_pi, grad_tmu = torch.autograd.grad(
+                param_loss, (theta_req, tmu_req), retain_graph=False)
+        else:
+            grad_theta_pi = torch.autograd.grad(param_loss, theta_req, retain_graph=False)[0]
 
     # E adjoint contribution to theta
     theta_req2 = theta.detach().requires_grad_(True)
+    tmu_req2 = (transfer_mat_unnormalized.detach().requires_grad_(True)
+                if _want_tmu else transfer_mat_unnormalized)
     with torch.enable_grad():
         if pibar_mode in ('dense', 'topk') and transfer_mat_unnormalized is not None:
             log_pS_r2, log_pD_r2, log_pL_r2, transfer_mat_r2, mt_r2_raw = extract_parameters(
-                theta_req2, transfer_mat_unnormalized,
+                theta_req2, tmu_req2,
                 genewise=genewise, specieswise=specieswise, pairwise=False,
             )
             mt_r2 = mt_r2_raw.squeeze(-1) if mt_r2_raw.ndim == 2 else mt_r2_raw
@@ -350,11 +372,18 @@ def _e_adjoint_and_theta_vjp(
 
             E_from_theta = G_E_theta(log_pS_r2, log_pD_r2, log_pL_r2, mt_r2)
 
-        gtheta_E = torch.autograd.grad(
-            E_from_theta, theta_req2,
-            grad_outputs=wE,
-            retain_graph=False,
-        )[0]
+        if _want_tmu:
+            gtheta_E, gtmu_E = torch.autograd.grad(
+                E_from_theta, (theta_req2, tmu_req2),
+                grad_outputs=wE, retain_graph=False,
+            )
+            grad_tmu = grad_tmu + gtmu_E
+        else:
+            gtheta_E = torch.autograd.grad(
+                E_from_theta, theta_req2,
+                grad_outputs=wE,
+                retain_graph=False,
+            )[0]
 
     torch.cuda.synchronize()
     _t_theta_vjp = time.perf_counter() - _t_qE - _t_cg  # remainder after CG
@@ -363,6 +392,8 @@ def _e_adjoint_and_theta_vjp(
     statsG.theta_vjp_time = _t_theta_vjp
 
     grad_theta = (grad_theta_pi + gtheta_E).detach()
+    if return_grad_tmu:
+        return grad_theta, statsG, (grad_tmu.detach() if grad_tmu is not None else None)
     return grad_theta, statsG
 
 
