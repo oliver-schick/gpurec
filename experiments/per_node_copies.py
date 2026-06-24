@@ -89,8 +89,8 @@ def main():
     lim = args.families
     fams, _ = _load_families(ALE, s2i, min_species=1, dtype=dtype, limit=lim)
     F = len(fams)
-    wl, root_clade_ids, family_meta = _build_wave_layout(fams, dev, dtype, return_meta=True) \
-        if "return_meta" in _build_wave_layout.__code__.co_varnames else (*_build_wave_layout(fams, dev, dtype), None)
+    # wave layout + dense forward are built PER CHUNK in the loop below (the all-families
+    # dense forward overflows GPU memory at S=513 / 7059 families).
     sp_gpu, _ = _sp_helpers_for_uniform(sp, dev, dtype)
 
     leaf_E = None; leaf_obs = None
@@ -110,66 +110,59 @@ def main():
                           transfer_mat=transfer_mat, max_transfer_mat=mt, max_iters=4000,
                           tolerance=1e-10, warm_start_E=None, dtype=dtype, device=dev,
                           pibar_mode="dense", leaf_E=leaf_E)
-    Pi_out = Pi_wave_forward(wave_layout=wl, species_helpers=sp_gpu, E=E_out["E"], Ebar=E_out["E_bar"],
-                             E_s1=E_out["E_s1"], E_s2=E_out["E_s2"], log_pS=log_pS, log_pD=log_pD,
-                             log_pL=log_pL, transfer_mat=transfer_mat, max_transfer_mat=mt,
-                             device=dev, dtype=dtype, pibar_mode="dense", leaf_obs_log=leaf_obs)
-    Pi_all = Pi_out["Pi"].cpu().numpy()                                    # [C_total, S] log2
-
-    # sp_child1/2 (sentinel S = leaf)
+    # sp_child1/2 (sentinel S = leaf) -- family-independent
     pidx = sp["s_P_indexes"].cpu().long(); cidx = sp["s_C12_indexes"].cpu().long()
     sp_c1 = np.full(S, S, dtype=np.int64); sp_c2 = np.full(S, S, dtype=np.int64)
     m = pidx < S
     sp_c1[pidx[m].numpy()] = cidx[m].numpy(); sp_c2[(pidx[~m] - S).numpy()] = cidx[~m].numpy()
-
     E_np = E_out["E"].cpu().numpy(); Ebar_np = E_out["E_bar"].cpu().numpy()
     lpS = log_pS.cpu().numpy(); lpD = log_pD.cpu().numpy(); lpO = log_pO.cpu().numpy()
 
-    if family_meta is None:  # fallback: rebuild clade offsets from per-family C
-        offs = np.cumsum([0] + [int(f["C"]) for f in fams])
-        family_meta = [{"clade_offset": int(offs[i]), "C": int(fams[i]["C"])} for i in range(F)]
-
     presence = np.zeros((F, S)); copies = np.zeros((F, S)); orig_root = np.zeros(F)
+    pp_root_an_sum = 0.0
     rng = np.random.default_rng(args.seed)
     LINEAGE = {"O", "D", "S", "T", "SL", "TL", "leaf"}
-    for f in range(F):
-        off = int(family_meta[f]["clade_offset"]); Cf = int(family_meta[f]["C"])
-        Pi_f = Pi_all[off:off + Cf]
-        mx = Pi_f.max(axis=1, keepdims=True)
-        Pibar_f = np.log2(np.exp2(Pi_f - mx) @ transfer_lin.T) + mx        # [Cf,S] log2
-        splits_of, cls, root_id = _decode_family(fams[f])
-        fwd = FamilyForward(Pi=Pi_f, Pibar=Pibar_f, E=E_np, Ebar=Ebar_np, log_pS=lpS, log_pD=lpD,
-                            transfer_mat=transfer_lin, log_pO=lpO, sp_child1=sp_c1, sp_child2=sp_c2,
-                            clade_leaf_species=cls, clade_leaf_label={}, splits_of=splits_of,
-                            root_clade_id=root_id, S=S)
-        scen = sample_family(fwd, args.n_samples, rng)
-        for sc in scen:
-            for s in sc.occupied:
-                presence[f, s] += 1
-            cc = np.zeros(S)
-            for ev in sc.events:
-                if ev.type in LINEAGE and 0 <= ev.species < S:
-                    cc[ev.species] += 1
-            copies[f] += cc
-            if sc.events and sc.events[0].species == root_branch:
-                orig_root[f] += 1
-        if (f + 1) % 500 == 0:
-            print(f"  {f+1}/{F} families sampled", flush=True)
+    CHUNK = 250                                       # batch the DENSE forward (avoid all-families OOM)
+    for i0 in range(0, F, CHUNK):
+        batch = fams[i0:i0 + CHUNK]
+        wl_b, rc_b = _build_wave_layout(batch, dev, dtype)
+        Pi_b = Pi_wave_forward(
+            wave_layout=wl_b, species_helpers=sp_gpu, E=E_out["E"], Ebar=E_out["E_bar"],
+            E_s1=E_out["E_s1"], E_s2=E_out["E_s2"], log_pS=log_pS, log_pD=log_pD, log_pL=log_pL,
+            transfer_mat=transfer_mat, max_transfer_mat=mt, device=dev, dtype=dtype,
+            pibar_mode="dense", leaf_obs_log=leaf_obs)["Pi"].cpu().numpy()      # [C_batch, S] log2
+        offs = np.cumsum([0] + [int(f["C"]) for f in batch])
+        rc_bn = rc_b.cpu().numpy() if torch.is_tensor(rc_b) else np.asarray(rc_b)
+        for j, fam in enumerate(batch):
+            f = i0 + j
+            off = int(offs[j]); Cf = int(fam["C"])
+            Pi_f = Pi_b[off:off + Cf]
+            mx = Pi_f.max(axis=1, keepdims=True)
+            Pibar_f = np.log2(np.exp2(Pi_f - mx) @ transfer_lin.T) + mx
+            splits_of, cls, root_id = _decode_family(fam)
+            fwd = FamilyForward(Pi=Pi_f, Pibar=Pibar_f, E=E_np, Ebar=Ebar_np, log_pS=lpS, log_pD=lpD,
+                                transfer_mat=transfer_lin, log_pO=lpO, sp_child1=sp_c1, sp_child2=sp_c2,
+                                clade_leaf_species=cls, clade_leaf_label={}, splits_of=splits_of,
+                                root_clade_id=root_id, S=S)
+            for sc in sample_family(fwd, args.n_samples, rng):
+                for s in sc.occupied:
+                    presence[f, s] += 1
+                for ev in sc.events:
+                    if ev.type in LINEAGE and 0 <= ev.species < S:
+                        copies[f, ev.species] += 1
+                if sc.events and sc.events[0].species == root_branch:
+                    orig_root[f] += 1
+            rr = lpO + Pi_b[int(rc_bn[j])]                      # analytic origination@root (validation)
+            rr = rr - (np.log2(np.exp2(rr - rr.max()).sum()) + rr.max())
+            pp_root_an_sum += float(np.exp2(rr[root_branch]))
+        print(f"  {min(i0 + CHUNK, F)}/{F} families sampled", flush=True)
     presence /= args.n_samples; copies /= args.n_samples; orig_root /= args.n_samples
 
-    # VALIDATION (self-contained): sampled origination-at-root vs analytic posterior
-    # analytic pp_root[f] = softmax2(log_pO + Pi_f[root_clade, :])[root_branch]
-    rc_np = (root_clade_ids.cpu().numpy() if torch.is_tensor(root_clade_ids)
-             else np.asarray(root_clade_ids))
-    root_probs = Pi_all[rc_np]                                  # [F,S] log2
-    logp = lpO[None, :] + root_probs
-    logp -= (np.log2(np.exp2((logp - logp.max(1, keepdims=True)) * 1.0).sum(1, keepdims=True))
-             + logp.max(1, keepdims=True))                      # logsumexp2 over species
-    pp_root_an = np.exp2(logp[:, root_branch])                  # [F]
-    samp_root = float(orig_root.sum()); an_root = float(pp_root_an.sum())
+    # VALIDATION (self-contained): sampled vs analytic origination-at-root
+    samp_root = float(orig_root.sum())
     print("\n" + "=" * 60)
-    print(f"VALIDATION origination@root:  sampled={samp_root:.1f}   analytic={an_root:.1f}   "
-          f"diff={samp_root-an_root:+.1f}  (should match within ~sqrt(F/N))")
+    print(f"VALIDATION origination@root:  sampled={samp_root:.1f}   analytic={pp_root_an_sum:.1f}   "
+          f"diff={samp_root - pp_root_an_sum:+.1f}  (should match within ~sqrt(F/N))")
 
     # per-clade-ancestor genome size
     from clade_groups import BIGTREE_DTL_CLADES, species_node_leafsets, parse_labeled_newick
