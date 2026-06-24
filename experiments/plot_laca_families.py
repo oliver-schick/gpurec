@@ -40,8 +40,8 @@ ax.spines[["top", "right"]].set_visible(False)
 ax.grid(axis="y", alpha=0.25)
 ax.legend(handles=[Patch(facecolor=DARK, edgecolor="k", label=f"shared ({shared})"),
                    Patch(facecolor=LIGHT, edgecolor="k", label="model-specific")],
-          loc="upper left", bbox_to_anchor=(0.02, 0.66), fontsize=9.5, framealpha=0.95,
-          title="last two bars", title_fontsize=8.5)
+          loc="upper center", bbox_to_anchor=(0.5, -0.16), ncol=2, fontsize=10,
+          framealpha=0.95, title="last two bars (fitted origination)", title_fontsize=9)
 # annotate the two contrasts
 y = max(uni, nu, bw) * 1.10
 ax.annotate("", xy=(1, y), xytext=(0, y), arrowprops=dict(arrowstyle="<->", color="0.4"))

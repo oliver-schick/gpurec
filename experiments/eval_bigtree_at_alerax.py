@@ -126,7 +126,18 @@ def au_rank(per_by_root, roots):
         w = (B * phi * phi) / (bp * (1 - bp)).clamp_min(1e-12); sw = w.sqrt()
         X = torch.stack([1 / sig, sig], 1)
         beta = torch.linalg.lstsq((X * sw.unsqueeze(1)), (z * sw)).solution
-        au = 0.0 if float(BP[:, r].max()) == 0.0 else float(1 - Phi(beta[0] - beta[1]))
+        # AU edge cases. The multiscale regression needs BP to VARY across scales to
+        # estimate the signed distance/curvature; at the saturated extremes it is
+        # degenerate (z is constant across scales -> beta is meaningless, ~0.63).
+        bpmin = float(BP[:, r].min()); bpmax = float(BP[:, r].max())
+        if bpmax == 0.0:
+            au = 0.0                      # never selected at any scale -> AU 0
+        elif bpmin >= 1.0 - 1e-12:
+            au = 1.0                      # selected in EVERY replicate at EVERY scale
+                                          # (dominant tree) -> AU 1 by convention, not the
+                                          # degenerate-regression ~0.63
+        else:
+            au = float(1 - Phi(beta[0] - beta[1]))
         res.append((roots[r], float(tot[r]), float(BP[5, r]), au))
     res.sort(key=lambda x: -x[1])
     return res, n

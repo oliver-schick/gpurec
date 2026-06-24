@@ -76,7 +76,16 @@ def au_for(model):
         sw = w.sqrt()
         X = torch.stack([1 / sig, sig], 1)                       # z = d/sig + c*sig
         beta = torch.linalg.lstsq((X * sw.unsqueeze(1)), (z * sw)).solution
-        au = 0.0 if float(BP[:, r].max()) == 0.0 else float(1 - Phi(beta[0] - beta[1]))
+        # Guard the saturated extremes: the multiscale regression is degenerate when BP
+        # does not vary across scales (z constant -> beta meaningless, ~0.63). BP=1 at
+        # every scale = dominant tree -> AU 1; BP=0 everywhere -> AU 0.
+        bpmin = float(BP[:, r].min())
+        if float(BP[:, r].max()) == 0.0:
+            au = 0.0
+        elif bpmin >= 1.0 - 1e-12:
+            au = 1.0
+        else:
+            au = float(1 - Phi(beta[0] - beta[1]))
         res.append((ROOTS[r], float(tot[r]), float(BP[5, r]), au))
     res.sort(key=lambda x: -x[1])
     b0 = res[0][1]
