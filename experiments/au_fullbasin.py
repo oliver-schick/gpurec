@@ -91,6 +91,15 @@ def main():
         per_by_root[r] = p
         print(f"[done] {r:16s} sum_logL={sum(p.values()):.1f}  (F={len(p)})", flush=True)
     roots = [r for r in ROOTS if r in per_by_root]
+    # Cache the per-family logL matrix [n, R] so the bootstrap can be re-run at any B
+    # (e.g. experiments/au_highb.py --npz ...) without recomputing the 15 forwards.
+    import numpy as np
+    common = sorted(set.intersection(*[set(per_by_root[r]) for r in roots]))
+    Lmat = np.array([[per_by_root[r][f] for r in roots] for f in common], dtype=np.float64)
+    np.savez("/work/SzollosiU/gergely-szollosi/williams_run/undine/FULLbasin_perfam.npz",
+             L=Lmat, roots=np.array(roots), families=np.array(common))
+    print(f"[npz] wrote FULLbasin_perfam.npz  L={Lmat.shape}  (n={len(common)}, R={len(roots)})",
+          flush=True)
     res, n = au_rank(per_by_root, roots)
     print("\n" + "=" * 64)
     print(f"AU TEST on gpurec FULLbasin rooting  (n={n} families, {len(roots)} roots)")
