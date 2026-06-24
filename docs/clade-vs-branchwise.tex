@@ -56,6 +56,16 @@ families, Jaccard $0.76$, with per-family root-origination probabilities correla
 So the size of the inferred ancestral genome is set chiefly by the origination model, and the
 branch-wise rates refine rather than reshape it.
 
+The same reconciliation reconstructs the gene complement of \emph{every} ancestral node, not
+only the root: summing each family's posterior probability of being present at a node gives that
+node's expected genome size. Figure~\ref{fig:genomes} shows these sizes at the ancestor of each
+named clade under the branch-wise model. The last archaeal common ancestor (root) carries
+$\approx$$1{,}350$ families in expectation (the stricter $\mathrm{PP}\!\ge\!0.5$ families-at-root
+count of Figure~\ref{fig:laca} is 903); several deep ancestors --- DPANN, Asgard, TAC --- are
+reconstructed larger still, and the shallowest sub-lineages (Pacearchaeota, Nanoarchaeota)
+smallest. Per-family expected copy numbers at every node are provided as a supplementary table
+(\texttt{per\_family\_copies\_bigtree\_Eury.tsv.gz}, 7{,}059 families $\times$ 513 nodes).
+
 \begin{table}[h]
 \centering\footnotesize
 \setlength{\tabcolsep}{4.5pt}
@@ -65,10 +75,10 @@ branch-wise rates refine rather than reshape it.
 \cmidrule(lr){2-4}\cmidrule(lr){5-7}
 candidate root & uni.\ clade & n-u.\ clade & branchwise & uni.\ clade & n-u.\ clade & branchwise \\
 \midrule
-Euryarchaeota   & $-1645.0$ & $-1642.4$ & $\mathbf{-1631.5}$ & $0.64$ & $\mathbf{1.00}$ & $\mathbf{1.00}$ \\
+Euryarchaeota   & $-1645.0$ & $-1642.4$ & $\mathbf{-1631.5}$ & $0.65$ & $\mathbf{1.00}$ & $\mathbf{1.00}$ \\
 HalobacThermopl & $-1644.7$ & $-1647.8$ & $-1635.1$ & $<$.05 & $<$.05 & 0.00 \\
 TackA           & $-1645.1$ & $-1643.5$ & $-1635.5$ & $<$.05 & $<$.05 & 0.00 \\
-MHH             & $-1644.7$ & $-1649.5$ & $-1637.7$ & $\mathbf{0.49}$ & $<$.05 & 0.00 \\
+MHH             & $-1644.7$ & $-1649.5$ & $-1637.7$ & $0.48$ & $<$.05 & 0.00 \\
 Kor             & $-1645.7$ & $-1648.0$ & $-1637.9$ & $<$.05 & $<$.05 & 0.00 \\
 TACA            & $-1646.1$ & $-1648.4$ & $-1638.4$ & $<$.05 & $<$.05 & 0.00 \\
 DPANN           & $-1645.2$ & $-1644.3$ & $-1639.7$ & $<$.05 & $<$.05 & 0.00 \\
@@ -86,18 +96,19 @@ Micra5          & $-1645.5$ & $-1648.9$ & $-1644.1$ & $<$.05 & $<$.05 & 0.00 \\
 \emph{uniform} origination ($\approx$ AleRax's no-origination BIC-best model); \emph{n-u.\
 clade} = clade rates with \emph{fitted} origination; \emph{branchwise} = per-branch rates with
 fitted origination. Log-likelihoods are gpurec marginal values (directly comparable); AU are
-scale-invariant approximately-unbiased bootstrap supports. The uniform-origination model is a
-genuine near-tie: Euryarchaeota and MHH are each selected in a substantial fraction of bootstrap
-replicates (bootstrap proportion $0.58$ and $0.40$; AU $0.64$ and $0.49$), an
-\{Euryarchaeota, MHH\} region. Adding fitted origination (same clade rates) makes Euryarchaeota
-decisive: it is selected in \emph{every} bootstrap replicate at every scale (bootstrap proportion
-$1.0$, hence AU $=1.0$) under both the clade-grouped and branch-wise models --- the rooting comes
-from the \emph{origination} term, not the rate granularity. (The multiscale-AU regression is
-degenerate at a saturated bootstrap proportion of $1.0$, where it returns a spurious $\sim$$0.63$;
-we report the convention $\mathrm{AU}=1.0$ for a tree selected in all replicates.) The branch-wise
-rates then improve the fit at every root (by $+10{,}888$ nats at Euryarchaeota over the
-non-uniform clade model) without changing the rooting; on families withheld from fitting they
-predict $+1.66$ per family better (Figure~\ref{fig:cv}).}
+scale-invariant approximately-unbiased multiscale-bootstrap supports ($10^6$ replicates per
+scale). The uniform-origination model is a genuine near-tie: Euryarchaeota and MHH are each
+selected in a large fraction of bootstrap replicates (bootstrap proportion $0.57$ and $0.41$;
+AU $0.65$ and $0.48$), a clean \{Euryarchaeota, MHH\} confidence region (no other root reaches
+AU $0.05$). Adding fitted origination (same clade rates) makes Euryarchaeota decisive: it is
+selected in \emph{every} replicate at every scale (it won all $10^7$ resamples; bootstrap
+proportion $1.0$, hence AU $=1.0$) under both the clade-grouped and branch-wise models --- the
+rooting comes from the \emph{origination} term, not the rate granularity. (At a saturated
+bootstrap proportion of $1.0$ the multiscale-AU regression is degenerate and returns a spurious
+$\sim$$0.63$; we report the convention $\mathrm{AU}=1.0$ for a tree selected in all replicates.)
+The branch-wise rates then improve the fit at every root (by $+10{,}888$ nats at Euryarchaeota
+over the non-uniform clade model) without changing the rooting; on families withheld from
+fitting they predict $+1.66$ per family better (Figure~\ref{fig:cv}).}
 \label{tab:roots}
 \end{table}
 
@@ -130,6 +141,17 @@ further 131 to 903 (the rate-granularity effect). The two fitted-origination mod
 of these families (dark), differing only in small model-specific remainders (light). Origination
 dominates; rate granularity refines. (Of 7{,}059 families.)}
 \label{fig:laca}
+\end{figure}
+
+\begin{figure}[h]\centering
+\includegraphics[width=0.74\textwidth]{clade_genome_sizes_bigtree_Eury.png}
+\caption{Reconstructed ancestral genome size --- the expected number of gene families present
+(summed posterior presence) --- at the ancestor of each named clade, under the branch-wise
+DTL+origination model on the Euryarchaeota-rooted tree. The root ancestor (LACA, highlighted)
+carries $\approx$$1{,}350$ families in expectation; the thresholded ($\mathrm{PP}\!\ge\!0.5$)
+LACA count is the 903 of Figure~\ref{fig:laca}. Reconstructed by stochastic backtracking of the
+reconciliation (100 samples per family).}
+\label{fig:genomes}
 \end{figure}
 
 \end{document}
