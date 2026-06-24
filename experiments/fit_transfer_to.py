@@ -42,7 +42,8 @@ def _dense_species_helpers(sp, device, dtype):
 
 
 def fit_root(root, data_dir, device, dtype, mode, transfer, n_fam, steps, lr, fm_mode, seed,
-             tree=None, ale_dir=None, fm_path=None, warm_sidecar=None, fp_iters=400, out_sidecar=None):
+             tree=None, ale_dir=None, fm_path=None, warm_sidecar=None, fp_iters=400, out_sidecar=None,
+             warm_model_params=None, warm_atree=None):
     import json
     from gpurec.core.batching import collate_gene_families
     from gpurec.core.extract_parameters import extract_parameters
@@ -82,6 +83,12 @@ def fit_root(root, data_dir, device, dtype, mode, transfer, n_fam, steps, lr, fm
     if warm_sidecar:
         wd = json.load(open(warm_sidecar)); warm = torch.tensor(wd["theta_log2"], dtype=dtype).reshape(S, 3)
         print(f"  warm-started theta from {Path(warm_sidecar).name}", flush=True)
+    elif warm_model_params:
+        from clade_groups import branch_params_from_alerax
+        rb, _o, _d = branch_params_from_alerax(sp, warm_atree or tree_path, warm_model_params)
+        warm = torch.log2(rb.clamp_min(1e-10)).to(dtype=dtype)
+        print(f"  warm-started theta from model_params {Path(warm_model_params).name} "
+              f"(unmapped={len(_d.get('unmapped', []))})", flush=True)
     if warm is not None:
         theta_DL = warm[:, :2].clone().to(device=device, dtype=dtype).requires_grad_(True)
     else:
@@ -158,6 +165,8 @@ def main():
     ap.add_argument("--ale-dir", help="explicit dir of .ale files (big tree); overrides --data-dir/ccps")
     ap.add_argument("--fm-path", help="explicit fraction_missing file")
     ap.add_argument("--warm-sidecar", help="init theta (D,L,T) from a FULLbasin rates sidecar JSON")
+    ap.add_argument("--warm-model-params", help="init theta from AleRax model_parameters (e.g. the paper's)")
+    ap.add_argument("--warm-atree", help="labelled tree for --warm-model-params (defaults to --tree)")
     ap.add_argument("--fp-iters", type=int, default=400, help="fixed-point iters (lower = less autograd memory)")
     ap.add_argument("--out-sidecar", help="write fitted theta+omega to this JSON")
     ap.add_argument("--mode", default="transfer-to", choices=["donor", "transfer-to"])
@@ -173,7 +182,8 @@ def main():
     r = fit_root(args.root, Path(args.data_dir), device, dtype, args.mode, args.transfer,
                  args.families, args.steps, args.lr, args.fm_mode, args.seed,
                  tree=args.tree, ale_dir=args.ale_dir, fm_path=args.fm_path,
-                 warm_sidecar=args.warm_sidecar, fp_iters=args.fp_iters, out_sidecar=args.out_sidecar)
+                 warm_sidecar=args.warm_sidecar, fp_iters=args.fp_iters, out_sidecar=args.out_sidecar,
+                 warm_model_params=args.warm_model_params, warm_atree=args.warm_atree)
     print(f"[result] root={args.root} mode={args.mode} transfer={args.transfer} "
           f"F={r['F']} logL_ln={r['logL_ln']:.1f}")
     return 0
