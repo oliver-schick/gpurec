@@ -28,14 +28,14 @@ Relaxing the clade constraint improves the fit by $\sim$10{,}900 log-likelihood 
 maximum-likelihood rooting under both models.
 
 A model with thousands of free rates risks describing noise rather than signal, so we tested
-it by cross-validation (Figure~\ref{fig:cv}). We estimated the rates from one half of the gene
-families and used them to predict the likelihood of the other half, which took no part in
+it by cross-validation (Figure~\ref{fig:cv}). We estimated the rates from a random half of the
+gene families and used them to predict the likelihood of the other half, which took no part in
 fitting. The branch-wise model predicts these withheld families better than the clade-grouped
-model, by $+0.44$ log-likelihood units per family --- in the same direction, though smaller,
-as on the families used for fitting ($+2.71$ per family). Had the additional parameters been
-absorbing noise they would have \emph{degraded} prediction on the withheld families; instead
-they improve it. The among-branch rate variation the model adds is therefore real, not an
-artefact of over-parameterisation.
+model, by $+1.66$ log-likelihood units per family --- as much as on the families used for
+fitting ($+1.49$ per family). Had the additional parameters been absorbing noise they would
+have \emph{degraded} prediction on the withheld families; instead they improve it by the same
+margin in and out of sample. The among-branch rate variation the model adds is therefore real,
+not an artefact of over-parameterisation.
 
 That variation has a clear and interpretable structure (Figure~\ref{fig:rates}). Duplication
 and transfer rates are essentially \emph{clade-constant}: within each named clade the
@@ -57,40 +57,41 @@ So the size of the inferred ancestral genome is set chiefly by the origination m
 branch-wise rates refine rather than reshape it.
 
 \begin{table}[h]
-\centering\small
-\begin{tabular}{lrrcc}
+\centering\footnotesize
+\setlength{\tabcolsep}{4.5pt}
+\begin{tabular}{lrrrccc}
 \toprule
- & clade-grouped & branch-wise & clade-grouped & branch-wise \\
-candidate root & $\log L$ & $\log L$ & AU & AU \\
+ & \multicolumn{3}{c}{data $\log L$ ($\times10^3$ nats)} & \multicolumn{3}{c}{AU support} \\
+\cmidrule(lr){2-4}\cmidrule(lr){5-7}
+candidate root & uni.\ clade & n-u.\ clade & branchwise & uni.\ clade & n-u.\ clade & branchwise \\
 \midrule
-Euryarchaeota    & $-1{,}642{,}425$ & $\mathbf{-1{,}631{,}537}$ & $\mathbf{0.63}$ & $\mathbf{0.63}$ \\
-HalobacThermopl  & $-1{,}647{,}830$ & $-1{,}635{,}105$ & $<$0.05 & 0.00 \\
-TackA            & $-1{,}643{,}485$ & $-1{,}635{,}514$ & $<$0.05 & 0.00 \\
-MHH              & $-1{,}649{,}534$ & $-1{,}637{,}704$ & $<$0.05 & 0.00 \\
-Kor              & $-1{,}647{,}973$ & $-1{,}637{,}909$ & $<$0.05 & 0.00 \\
-TACA             & $-1{,}648{,}397$ & $-1{,}638{,}428$ & $<$0.05 & 0.00 \\
-DPANN            & $-1{,}644{,}330$ & $-1{,}639{,}707$ & $<$0.05 & 0.00 \\
-TAC              & $-1{,}648{,}893$ & $-1{,}639{,}970$ & $<$0.05 & 0.00 \\
-Asgard           & $-1{,}649{,}022$ & $-1{,}641{,}098$ & $<$0.05 & 0.00 \\
-MicraDia         & $-1{,}646{,}301$ & $-1{,}642{,}346$ & $<$0.05 & 0.00 \\
-AMD              & $-1{,}647{,}588$ & $-1{,}642{,}470$ & $<$0.05 & 0.00 \\
-UndineClu2       & $-1{,}647{,}958$ & $-1{,}643{,}241$ & $<$0.05 & 0.00 \\
-Alti             & $-1{,}648{,}300$ & $-1{,}643{,}347$ & $<$0.05 & 0.00 \\
-Cluster2         & $-1{,}648{,}352$ & $-1{,}643{,}727$ & $<$0.05 & 0.00 \\
-Micra5           & $-1{,}648{,}861$ & $-1{,}644{,}060$ & $<$0.05 & 0.00 \\
+Euryarchaeota   & $-1645.0$ & $-1642.4$ & $\mathbf{-1631.5}$ & $\mathbf{0.64}$ & $\mathbf{0.63}$ & $\mathbf{0.63}$ \\
+HalobacThermopl & $-1644.7$ & $-1647.8$ & $-1635.1$ & $<$.05 & $<$.05 & 0.00 \\
+TackA           & $-1645.1$ & $-1643.5$ & $-1635.5$ & $<$.05 & $<$.05 & 0.00 \\
+MHH             & $-1644.7$ & $-1649.5$ & $-1637.7$ & $\mathbf{0.49}$ & $<$.05 & 0.00 \\
+Kor             & $-1645.7$ & $-1648.0$ & $-1637.9$ & $<$.05 & $<$.05 & 0.00 \\
+TACA            & $-1646.1$ & $-1648.4$ & $-1638.4$ & $<$.05 & $<$.05 & 0.00 \\
+DPANN           & $-1645.2$ & $-1644.3$ & $-1639.7$ & $<$.05 & $<$.05 & 0.00 \\
+TAC             & $-1647.0$ & $-1648.9$ & $-1640.0$ & $<$.05 & $<$.05 & 0.00 \\
+Asgard          & $-1647.0$ & $-1649.0$ & $-1641.1$ & $<$.05 & $<$.05 & 0.00 \\
+MicraDia        & $-1645.3$ & $-1646.3$ & $-1642.3$ & $<$.05 & $<$.05 & 0.00 \\
+AMD             & $-1645.7$ & $-1647.6$ & $-1642.5$ & $<$.05 & $<$.05 & 0.00 \\
+UndineClu2      & $-1645.5$ & $-1648.0$ & $-1643.2$ & $<$.05 & $<$.05 & 0.00 \\
+Alti            & $-1645.0$ & $-1648.3$ & $-1643.3$ & $<$.05 & $<$.05 & 0.00 \\
+Cluster2        & $-1645.4$ & $-1648.4$ & $-1643.7$ & $<$.05 & $<$.05 & 0.00 \\
+Micra5          & $-1645.5$ & $-1648.9$ & $-1644.1$ & $<$.05 & $<$.05 & 0.00 \\
 \bottomrule
 \end{tabular}
-\caption{All 15 candidate roots under matched origination (both models include the origination
-term): clade-grouped versus fully branch-wise per-branch rates. Log-likelihoods are on gpurec's
-marginal scale, directly comparable, and the approximately-unbiased (AU) supports are
-scale-invariant bootstrap values. Both models place Euryarchaeota first and reject every
-alternative root (AU $<0.05$); the branch-wise model fits better at every root (by $+10{,}888$
-at Euryarchaeota; held-out cross-validation $+1{,}556$, Figure~\ref{fig:cv}). So the per-branch
-rates improve the fit throughout without changing the rooting. (AleRax's parsimonious,
-BIC-best model omits origination and instead supports an \{Euryarchaeota, MHH\} region; it is
-the \emph{origination} term --- present in both models here --- that resolves the rooting to
-Euryarchaeota, not the rate granularity. The two models also order the lower roots somewhat
-differently, reflecting that neither resolves them strongly.)}
+\caption{All 15 candidate roots under the three models: \emph{uni.\ clade} = clade rates with
+\emph{uniform} origination ($\approx$ AleRax's no-origination BIC-best model); \emph{n-u.\
+clade} = clade rates with \emph{fitted} origination; \emph{branchwise} = per-branch rates with
+fitted origination. Log-likelihoods are gpurec marginal values (directly comparable); AU are
+scale-invariant bootstrap supports. The uniform-origination model is a near-tie supporting an
+\{Euryarchaeota, MHH\} region; adding fitted origination (same clade rates) makes Euryarchaeota
+decisive (AU \{Eury\}) --- the rooting comes from the \emph{origination} term, not the rate
+granularity. The branch-wise rates then improve the fit at every root (by $+10{,}888$ nats at
+Euryarchaeota over the non-uniform clade model) without changing the rooting; on families
+withheld from fitting they predict $+1.66$ per family better (Figure~\ref{fig:cv}).}
 \label{tab:roots}
 \end{table}
 
