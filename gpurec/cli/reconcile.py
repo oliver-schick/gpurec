@@ -13,7 +13,20 @@ from ..core.model import GeneDataset
 
 
 def main():
-    """Main CLI function."""
+    """Main CLI function.
+
+    Subcommands:
+      gpurec fit ...        general DTL+origination RATE OPTIMISATION (the fitter)
+      gpurec reconcile ...  forward likelihood at fixed rates (the default below)
+    A bare ``gpurec --species ... --gene ...`` keeps the legacy forward behaviour.
+    """
+    argv = sys.argv[1:]
+    if argv and argv[0] == "fit":
+        from .fit import main as fit_main
+        return fit_main(argv[1:])
+    if argv and argv[0] == "reconcile":
+        argv = argv[1:]
+
     parser = argparse.ArgumentParser(
         description="GPU-accelerated DTL reconciliation via CCP likelihood"
     )
@@ -46,7 +59,7 @@ def main():
         default="float64",
         help="Computation dtype (default: float64)",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     device = (
         torch.device(args.device)

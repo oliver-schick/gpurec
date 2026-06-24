@@ -144,15 +144,24 @@ def _preflight(args, data_dir: Path):
 
 # ── full run ───────────────────────────────────────────────────────────────────
 def _run(args, data_dir: Path):
-    tree_path = _tree_path(data_dir, args.root)
-    if args.root not in KNOWN_ROOTS:
-        print(f"[warn] root {args.root!r} not in known Undine roots {KNOWN_ROOTS}")
+    if args.species_tree:
+        tree_path = Path(args.species_tree)            # GENERAL: explicit tree
+    else:
+        tree_path = _tree_path(data_dir, args.root)    # undine preset
+        if args.root not in KNOWN_ROOTS:
+            print(f"[warn] root {args.root!r} not in known Undine roots {KNOWN_ROOTS}")
     if not tree_path.exists():
         raise SystemExit(f"species tree not found: {tree_path}")
-    ale_paths = _ale_paths(data_dir, args.ccp_dir)
-    if not ale_paths:
-        raise SystemExit(f"no .ale files under {data_dir / args.ccp_dir} "
-                         f"(run ALEobserve on the ufboots first)")
+    if args.ale_dir:                                   # GENERAL: explicit .ale dir
+        ale_paths = sorted(p for p in glob.glob(str(Path(args.ale_dir) / "*.ale"))
+                           if not Path(p).name.startswith("._"))
+        if not ale_paths:
+            raise SystemExit(f"no .ale files under {args.ale_dir}")
+    else:
+        ale_paths = _ale_paths(data_dir, args.ccp_dir)
+        if not ale_paths:
+            raise SystemExit(f"no .ale files under {data_dir / args.ccp_dir} "
+                             f"(run ALEobserve on the ufboots first)")
     if not torch.cuda.is_available():
         raise SystemExit("CUDA required for optimization (run on the A100). "
                          "Use --preflight for the CPU data-wiring check.")
@@ -202,7 +211,8 @@ def _run(args, data_dir: Path):
     print(f"      wave layout built in {time.time() - t0:.1f}s", flush=True)
 
     # 3. fraction-missing (decoupled E vs Pi leaf boundary), same as Williams.
-    fm_path = _fraction_missing_path(data_dir)
+    fm_path = (Path(args.fraction_missing) if args.fraction_missing
+               else _fraction_missing_path(data_dir))
     leaf_E = None
     leaf_obs_log = None
     fm_info = {"enabled": False, "fm_mode": args.fm_mode}
@@ -533,7 +543,8 @@ def _run(args, data_dir: Path):
 
     sidecar = out_path.with_suffix(out_path.suffix + ".json")
     payload = {
-        "command": " ".join(sys.argv), "dataset": "This_study/Undine_C60",
+        "command": " ".join(sys.argv),
+        "dataset": (f"general:{tree_path.name}" if args.species_tree else "This_study/Undine_C60"),
         "root": args.root, "species_tree": str(tree_path), "S": S, "names": names,
         "n_families_kept": len(families),
         "n_families_dropped_min_species": stats["dropped_min_species"],
@@ -561,7 +572,19 @@ def _parse_args(argv=None):
     p = argparse.ArgumentParser(
         description="Branch-wise DTL rates + rooting for the This_study/Undine "
                     "big tree from UFBoot samples (gpurec specieswise wave).")
-    p.add_argument("--root", required=True, help=f"one of {KNOWN_ROOTS}")
+    p.add_argument("--root", default="root",
+                   help="root LABEL (output naming + root-mass origination prior). "
+                        f"For the undine preset, one of {KNOWN_ROOTS}.")
+    # ── GENERAL (dataset-agnostic) inputs: override the undine path convention ──
+    p.add_argument("--species-tree", default=None,
+                   help="GENERAL: explicit rooted species tree (Newick). Overrides the "
+                        "undine --root/--data-dir tree-name convention.")
+    p.add_argument("--ale-dir", default=None,
+                   help="GENERAL: directory of ALEobserve .ale CCP files (one per "
+                        "family). Overrides --data-dir/--ccp-dir.")
+    p.add_argument("--fraction-missing", default=None,
+                   help="GENERAL: explicit fraction_missing file (else the --data-dir "
+                        "default location is used).")
     p.add_argument("--data-dir", default=DEFAULT_DATA_DIR)
     p.add_argument("--ccp-dir", default=DEFAULT_CCP_SUBDIR,
                    help="dir (under --data-dir) of ALEobserve .ale CCPs; "

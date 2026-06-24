@@ -20,6 +20,7 @@ dev = ["pytest", "ipython"]
 
 [project.scripts]
 gpurec = "gpurec.cli.reconcile:main"
+gpurec-fit = "gpurec.cli.fit:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
