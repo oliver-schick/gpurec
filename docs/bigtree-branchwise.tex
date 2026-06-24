@@ -226,25 +226,29 @@ which it passes; a random split would give a cleaner balanced number.
 \FloatBarrier
 \section{Reproducible protocol (the minimal robust setup)}
 \label{sec:protocol}
-All commands run from the \code{gpurec-cpp} checkout on a single A100 (\code{largegpu}). The
-shell variables below name the output directory (\code{\$U}), the data root (\code{\$DD}),
+The fitting steps use the general \code{gpurec fit} command, which takes the inputs
+\emph{explicitly} (\code{--species-tree}, \code{--ale-dir}) rather than any dataset-specific
+naming convention --- so the same commands apply to any species tree + gene-family set. Run
+from a \code{gpurec} checkout on a single A100 (\code{largegpu}); \code{gpurec fit --help}
+lists every flag. The shell variables below name the output directory (\code{\$U}), the data
+root (\code{\$DD}), the species tree (\code{\$SP}), the gene-family directory (\code{\$ALE}),
 and the AleRax clade-grouping directory (\code{\$CG}).
 
 \begin{lstlisting}[language=bash]
 U=/work/SzollosiU/gergely-szollosi/williams_run/undine
 DD=/work/SzollosiU/gergely-szollosi/williams_run/data/3_Reconciliation/This_study
+SP=$DD/4_species_tree/Undine_C60_Euryroot_short_name.nw   # explicit rooted species tree
+ALE=$DD/3_UFBOOTs/ufboot_for_alerax                       # directory of .ale CCPs (7059)
+FM=$DD/fraction_missing                                   # fraction_missing file
 CG="$U/alerax_ref/3_Reconciliation/This_study/5_reconcilation models/DTL_br1_O/Undine_C60_Euryroot2_OR"
-# data:  tree  $DD/4_species_tree/Undine_C60_<ROOT>root_short_name.nw
-#        .ale  $DD/3_UFBOOTs/ufboot_for_alerax/*.ale   (7059 families)
-#        fraction_missing  $DD/fraction_missing
 \end{lstlisting}
 
 \paragraph{Step 1 --- clade-grouped warm-up (selects the deep basin, $\sim$30 min).}
 Fit the clade-grouped DTL$+O$ model, seeded from AleRax's rates. This is the step that lands
 in the deep/Euryarchaeota basin.
 \begin{lstlisting}[language=bash]
-python experiments/run_undine_branchwise.py --root Eury \
-  --families 0 --min-species 1 --fm-mode e-only --prior none \
+gpurec fit --species-tree "$SP" --ale-dir "$ALE" --fraction-missing "$FM" \
+  --min-species 1 --fm-mode e-only --prior none \
   --clade-groups "$CG" --init-from-alerax --origination optimize \
   --family-batch-size 500 --steps 250 --dtype float64 \
   --out $U/AXgrp_DTL_br1_O_Eury.rates.txt
@@ -253,16 +257,15 @@ python experiments/run_undine_branchwise.py --root Eury \
 \paragraph{Step 2 --- fully free per-branch fit (the best fit, $\sim$1--7.5 h).}
 Warm-started from Step 1; no rate grouping, free per-branch origination.
 \begin{lstlisting}[language=bash]
-python experiments/run_undine_branchwise.py --root Eury \
-  --families 0 --min-species 1 --fm-mode e-only --prior none \
-  --origination optimize \
+gpurec fit --species-tree "$SP" --ale-dir "$ALE" --fraction-missing "$FM" \
+  --min-species 1 --fm-mode e-only --prior none --origination optimize \
   --init-from-rates $U/AXgrp_DTL_br1_O_Eury.rates.txt.json \
   --family-batch-size 500 --steps 250 --dtype float64 \
   --out $U/FULLbasin_Eury.rates.txt
 \end{lstlisting}
 
-\paragraph{Step 3 --- rooting / AU.} Run Steps 1--2 for every root (substitute
-\code{--root} and the matching \code{Undine\_C60\_<ROOT>root2\_OR} grouping dir), then:
+\paragraph{Step 3 --- rooting / AU.} Run Steps 1--2 for every root (point \code{--species-tree}
+at that root's tree and \code{--clade-groups} at its matching grouping dir), then:
 \begin{lstlisting}[language=bash]
 python experiments/au_fullbasin.py   # AU test over the 15 per-root fits
 \end{lstlisting}
@@ -276,12 +279,12 @@ python experiments/laca_compare.py --root Eury \
 \paragraph{Step 5 --- overfitting cross-validation.} Fit both models on the training half
 (\code{--families 3530}), then score held-out:
 \begin{lstlisting}[language=bash]
-python experiments/run_undine_branchwise.py --root Eury --families 3530 \
-  --min-species 1 --fm-mode e-only --prior none --clade-groups "$CG" \
+gpurec fit --species-tree "$SP" --ale-dir "$ALE" --fraction-missing "$FM" \
+  --families 3530 --min-species 1 --fm-mode e-only --prior none --clade-groups "$CG" \
   --init-from-alerax --origination optimize --family-batch-size 500 \
   --steps 250 --dtype float64 --out $U/CVgrouped_Eury_train.rates.txt
-python experiments/run_undine_branchwise.py --root Eury --families 3530 \
-  --min-species 1 --fm-mode e-only --prior none --origination optimize \
+gpurec fit --species-tree "$SP" --ale-dir "$ALE" --fraction-missing "$FM" \
+  --families 3530 --min-species 1 --fm-mode e-only --prior none --origination optimize \
   --init-from-rates $U/CVgrouped_Eury_train.rates.txt.json \
   --family-batch-size 500 --steps 250 --dtype float64 \
   --out $U/CVfree_Eury_train.rates.txt
@@ -305,19 +308,22 @@ be batched or it overflows the GPU kernels); \code{--dtype float64} (gradient ac
 The protocol uses a small number of scripts under \code{experiments/}. Their roles:
 
 \begin{description}
-\item[\code{run\_undine\_branchwise.py} --- the fitter.] The workhorse. Given a root, it
-  loads the rooted species tree and amalgamates the 7{,}059 gene-family conditional-clade
-  distributions from the \code{.ale} files (the C++ preprocessing), lays the families out in
-  cross-family ``waves'' for the GPU, and then \emph{maximises} the total reconciliation
-  log-likelihood over the DTL$(+O)$ rates by L-BFGS. Each optimisation step evaluates the
-  likelihood by two nested fixed points (extinction $E$ per branch, then the family
-  likelihoods $\Pi$) and gets the gradient by implicit differentiation. Flags choose the
-  model (free per-branch, or \code{--clade-groups} for AleRax's classes), the initialisation
-  (\code{--init-from-alerax}, \code{--init-from-rates}), and any prior
-  (\code{--prior}, \code{--dtl-tv-lambda}, \code{--origination-root-lambda}). It writes a
-  \code{.rates.txt} and a \code{.rates.txt.json} ``sidecar'' holding the fitted $\log_2$
-  per-branch rates (\code{theta\_log2}), the origination weights, the data log-likelihood,
-  and the exact command used --- every downstream script reads this sidecar.
+\item[\code{gpurec fit} --- the fitter (general CLI).] The workhorse, exposed as a general,
+  dataset-agnostic command: \code{gpurec fit --species-tree <Newick> --ale-dir <dir> ...}
+  (no dataset-specific naming convention; \code{gpurec fit --help} lists every flag). It loads
+  the rooted species tree and amalgamates the gene-family conditional-clade distributions from
+  the \code{.ale} files (the C++ preprocessing), lays the families out in cross-family
+  ``waves'' for the GPU, and then \emph{maximises} the total reconciliation log-likelihood over
+  the DTL$(+O)$ rates by L-BFGS. Each optimisation step evaluates the likelihood by two nested
+  fixed points (extinction $E$ per branch, then the family likelihoods $\Pi$) and gets the
+  gradient by implicit differentiation. Flags choose the model (free per-branch, or
+  \code{--clade-groups} for AleRax's classes), the initialisation (\code{--init-from-alerax},
+  \code{--init-from-rates}), and any prior (\code{--prior}, \code{--dtl-tv-lambda},
+  \code{--origination-root-lambda}). It writes a \code{.rates.txt} and a \code{.rates.txt.json}
+  ``sidecar'' holding the fitted $\log_2$ per-branch rates (\code{theta\_log2}), the
+  origination weights, the data log-likelihood, and the exact command used --- every downstream
+  script reads this sidecar. (Implementation: \code{gpurec/cli/fit.py} over the validated
+  branch-wise driver \code{experiments/run\_undine\_branchwise.py}.)
 
 \item[\code{au\_fullbasin.py} --- rooting confidence set.] Reads the per-root FULLbasin
   sidecars, recomputes every family's log-likelihood under each root, and runs the Shimodaira
