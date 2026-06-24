@@ -4,7 +4,8 @@ reconciliations (gpurec.core.sampler) at a fitted FULLbasin sidecar's rates.
 For each family f we build a sampler.FamilyForward, draw N reconciliations, and record
 per species branch s:
   - presence:  P(family has >=1 gene copy on s)   = fraction of samples with s in occupied
-  - copies:    E[# gene-tree nodes mapped to s]    (a copy-number proxy)
+  - copies:    E[# gene copies on s] = E[# lineage EXIT events {S,SL,T,TL,leaf} at s]
+               (one count per surviving copy; O and internal D nodes are NOT counted)
 Outputs:
   - <out>.npz                : presence [F,S], copies [F,S], names, root_branch
   - <out>.per_clade.json     : ancestral genome size (sum_f presence) at each named clade's
@@ -57,7 +58,10 @@ def _decode_family(fam):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default="Eury")
-    ap.add_argument("--sidecar", required=True)
+    ap.add_argument("--sidecar", help="gpurec rates sidecar JSON (theta_log2 + omega_log2)")
+    ap.add_argument("--alerax-model", choices=["DTL_br1_O", "DTL_br2"],
+                    help="instead of --sidecar, use AleRax's EXACT per-branch rates (the paper's "
+                         "parameters) from the reference model_parameters.txt")
     ap.add_argument("--n-samples", type=int, default=200)
     ap.add_argument("--families", type=int, default=0, help="limit #families (0=all; for validation)")
     ap.add_argument("--fm-mode", default="e-only", choices=["off", "e-only", "both"])
@@ -78,13 +82,35 @@ def main():
     names = list(sp["names"])
     par = species_parent_index(sp).tolist(); root_branch = [i for i in range(S) if par[i] < 0][0]
 
-    d = json.load(open(args.sidecar))
-    theta = torch.tensor(d["theta_log2"], dtype=dtype, device=dev).reshape(S, 3)
-    om = d.get("origination", {}).get("omega_log2")
-    if om is None:
-        log_pO = torch.full((S,), -math.log2(S), dtype=dtype, device=dev)
+    if args.alerax_model:
+        # the paper's EXACT per-branch rates (same params validated to r=0.999998 in
+        # eval_bigtree_at_alerax). Map AleRax labelled-tree branches -> gpurec nodes.
+        from clade_groups import branch_params_from_alerax
+        AXBASE = Path("/work/SzollosiU/gergely-szollosi/williams_run/undine/alerax_ref/"
+                      "3_Reconciliation/This_study/5_reconcilation models")
+        mdir = AXBASE / args.alerax_model / (f"Undine_C60_{args.root}root"
+                                             + ("2_OR" if args.alerax_model == "DTL_br1_O" else ""))
+        atree = mdir / "species_trees" / "starting_species_tree.newick"
+        atree = str(atree) if atree.exists() else str(tree)
+        rate_branch, orig_branch, diag = branch_params_from_alerax(
+            sp, atree, str(mdir / "model_parameters" / "model_parameters.txt"))
+        print(f"  [alerax {args.alerax_model}] unmapped={len(diag.get('unmapped', []))} "
+              f"orig_sum={diag.get('orig_sum')}", flush=True)
+        theta = torch.log2(rate_branch.clamp_min(1e-10)).to(device=dev, dtype=dtype)
+        if orig_branch is not None:
+            o = orig_branch.to(device=dev, dtype=dtype).clamp_min(1e-12); log_pO = torch.log2(o / o.sum())
+        else:
+            log_pO = torch.full((S,), -math.log2(S), dtype=dtype, device=dev)
     else:
-        om = torch.tensor(om, dtype=dtype, device=dev).reshape(S); log_pO = om - _lse2(om, 0)
+        if not args.sidecar:
+            raise SystemExit("need --sidecar or --alerax-model")
+        d = json.load(open(args.sidecar))
+        theta = torch.tensor(d["theta_log2"], dtype=dtype, device=dev).reshape(S, 3)
+        om = d.get("origination", {}).get("omega_log2")
+        if om is None:
+            log_pO = torch.full((S,), -math.log2(S), dtype=dtype, device=dev)
+        else:
+            om = torch.tensor(om, dtype=dtype, device=dev).reshape(S); log_pO = om - _lse2(om, 0)
 
     lim = args.families
     fams, _ = _load_families(ALE, s2i, min_species=1, dtype=dtype, limit=lim)
@@ -121,7 +147,13 @@ def main():
     presence = np.zeros((F, S)); copies = np.zeros((F, S)); orig_root = np.zeros(F)
     pp_root_an_sum = 0.0
     rng = np.random.default_rng(args.seed)
-    LINEAGE = {"O", "D", "S", "T", "SL", "TL", "leaf"}
+    # Copy number at species branch s = number of gene copies (lineages) present on s.
+    # Count one event per copy: the EXIT event by which a lineage leaves/terminates on s
+    # -- S, SL (speciate down), leaf (terminal), T, TL (transfer out). Do NOT count O (a
+    # birth, not a copy) or D (an INTERNAL duplication node: 1->2, both children continue
+    # at s and are counted by their own exits). Counting all events would give ~2k-1 per k
+    # copies (the k-1 internal D nodes + the O), inflating copy number ~2x.
+    COPY_EXIT = {"S", "SL", "T", "TL", "leaf"}
     CHUNK = 250                                       # batch the DENSE forward (avoid all-families OOM)
     for i0 in range(0, F, CHUNK):
         batch = fams[i0:i0 + CHUNK]
@@ -148,7 +180,7 @@ def main():
                 for s in sc.occupied:
                     presence[f, s] += 1
                 for ev in sc.events:
-                    if ev.type in LINEAGE and 0 <= ev.species < S:
+                    if ev.type in COPY_EXIT and 0 <= ev.species < S:
                         copies[f, ev.species] += 1
                 if sc.events and sc.events[0].species == root_branch:
                     orig_root[f] += 1
@@ -173,8 +205,11 @@ def main():
         lab = labeled.get(leafsets[s])
         if lab in BIGTREE_DTL_CLADES or s == root_branch:
             key = "LACA(root)" if s == root_branch else lab
-            per_clade[key] = dict(node=s, genome_size=float(presence[:, s].sum()),
-                                  expected_copies=float(copies[:, s].sum()))
+            per_clade[key] = dict(node=s,
+                                  genome_size=float(presence[:, s].sum()),       # E[#families present]
+                                  n_presence_gt0p5=int((presence[:, s] > 0.5).sum()),  # families w/ PP>0.5
+                                  sum_copies=float(copies[:, s].sum()),          # Σ_f gene copies (exit-counted)
+                                  expected_copies=float(copies[:, s].sum()))     # alias (back-compat)
     Path(args.out + ".per_clade.json").write_text(json.dumps(per_clade, indent=2))
     np.savez_compressed(args.out + ".npz", presence=presence, copies=copies,
                         names=np.array(names, dtype=object), root_branch=root_branch)
