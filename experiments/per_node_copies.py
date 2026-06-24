@@ -63,6 +63,9 @@ def main():
     ap.add_argument("--alerax-model", choices=["DTL_br1_O", "DTL_br2"],
                     help="instead of --sidecar, use AleRax's EXACT per-branch rates (the paper's "
                          "parameters) from the reference model_parameters.txt")
+    ap.add_argument("--model-params", help="arbitrary AleRax model_parameters.txt (per-branch D,L,T,O); "
+                    "e.g. the paper's 4_Ancestral_reconstruction rates. Mapped to nodes via --atree.")
+    ap.add_argument("--atree", help="labelled species tree matching --model-params (defaults to --root tree)")
     ap.add_argument("--n-samples", type=int, default=200)
     ap.add_argument("--families", type=int, default=0, help="limit #families (0=all; for validation)")
     ap.add_argument("--fm-mode", default="e-only", choices=["off", "e-only", "both"])
@@ -88,7 +91,18 @@ def main():
     names = list(sp["names"])
     par = species_parent_index(sp).tolist(); root_branch = [i for i in range(S) if par[i] < 0][0]
 
-    if args.alerax_model:
+    if args.model_params:
+        from clade_groups import branch_params_from_alerax
+        atree = args.atree or str(tree)
+        rate_branch, orig_branch, diag = branch_params_from_alerax(sp, atree, args.model_params)
+        print(f"  [model-params {Path(args.model_params).name}] unmapped={len(diag.get('unmapped', []))} "
+              f"orig_sum={diag.get('orig_sum')}", flush=True)
+        theta = torch.log2(rate_branch.clamp_min(1e-10)).to(device=dev, dtype=dtype)
+        if orig_branch is not None:
+            o = orig_branch.to(device=dev, dtype=dtype).clamp_min(1e-12); log_pO = torch.log2(o / o.sum())
+        else:
+            log_pO = torch.full((S,), -math.log2(S), dtype=dtype, device=dev)
+    elif args.alerax_model:
         # the paper's EXACT per-branch rates (same params validated to r=0.999998 in
         # eval_bigtree_at_alerax). Map AleRax labelled-tree branches -> gpurec nodes.
         from clade_groups import branch_params_from_alerax
