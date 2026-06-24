@@ -1,0 +1,163 @@
+{
+  "Halobacteriota": {
+    "node": 80,
+    "genome_size": 1040.78,
+    "n_presence_gt0p5": 939,
+    "sum_copies": 1254.14,
+    "expected_copies": 1254.14
+  },
+  "Thermoplasmatota": {
+    "node": 147,
+    "genome_size": 901.0100000000001,
+    "n_presence_gt0p5": 795,
+    "sum_copies": 1081.07,
+    "expected_copies": 1081.07
+  },
+  "MHH": {
+    "node": 189,
+    "genome_size": 1041.3100000000002,
+    "n_presence_gt0p5": 934,
+    "sum_copies": 1234.87,
+    "expected_copies": 1234.87
+  },
+  "TAC": {
+    "node": 311,
+    "genome_size": 1463.99,
+    "n_presence_gt0p5": 1369,
+    "sum_copies": 2012.1599999999999,
+    "expected_copies": 2012.1599999999999
+  },
+  "Asgard": {
+    "node": 350,
+    "genome_size": 1540.34,
+    "n_presence_gt0p5": 1481,
+    "sum_copies": 2375.5,
+    "expected_copies": 2375.5
+  },
+  "Korarchaeota": {
+    "node": 356,
+    "genome_size": 1362.63,
+    "n_presence_gt0p5": 1293,
+    "sum_copies": 1647.62,
+    "expected_copies": 1647.62
+  },
+  "Nanoarchaeota": {
+    "node": 362,
+    "genome_size": 589.75,
+    "n_presence_gt0p5": 410,
+    "sum_copies": 511.9699999999999,
+    "expected_copies": 511.9699999999999
+  },
+  "Woesearchaeota": {
+    "node": 401,
+    "genome_size": 541.81,
+    "n_presence_gt0p5": 444,
+    "sum_copies": 613.6199999999999,
+    "expected_copies": 613.6199999999999
+  },
+  "Pacearchaeota": {
+    "node": 424,
+    "genome_size": 509.69,
+    "n_presence_gt0p5": 415,
+    "sum_copies": 571.7,
+    "expected_copies": 571.7
+  },
+  "UBA10117": {
+    "node": 430,
+    "genome_size": 599.68,
+    "n_presence_gt0p5": 453,
+    "sum_copies": 580.04,
+    "expected_copies": 580.04
+  },
+  "Parva_related": {
+    "node": 439,
+    "genome_size": 701.41,
+    "n_presence_gt0p5": 529,
+    "sum_copies": 711.55,
+    "expected_copies": 711.55
+  },
+  "SpSt1190": {
+    "node": 445,
+    "genome_size": 771.72,
+    "n_presence_gt0p5": 587,
+    "sum_copies": 717.9099999999999,
+    "expected_copies": 717.9099999999999
+  },
+  "Nanohaloarchaeota": {
+    "node": 451,
+    "genome_size": 762.0,
+    "n_presence_gt0p5": 616,
+    "sum_copies": 737.4099999999999,
+    "expected_copies": 737.4099999999999
+  },
+  "EX4484_52": {
+    "node": 454,
+    "genome_size": 806.79,
+    "n_presence_gt0p5": 694,
+    "sum_copies": 845.1599999999999,
+    "expected_copies": 845.1599999999999
+  },
+  "PWEA01": {
+    "node": 458,
+    "genome_size": 708.7199999999999,
+    "n_presence_gt0p5": 581,
+    "sum_copies": 667.76,
+    "expected_copies": 667.76
+  },
+  "Aenigmatarchaeota": {
+    "node": 467,
+    "genome_size": 767.2,
+    "n_presence_gt0p5": 614,
+    "sum_copies": 808.8199999999999,
+    "expected_copies": 808.8199999999999
+  },
+  "Undinarchaeota": {
+    "node": 473,
+    "genome_size": 1036.71,
+    "n_presence_gt0p5": 801,
+    "sum_copies": 877.9,
+    "expected_copies": 877.9
+  },
+  "Altarchaeota": {
+    "node": 479,
+    "genome_size": 1403.5,
+    "n_presence_gt0p5": 1240,
+    "sum_copies": 1599.7099999999998,
+    "expected_copies": 1599.7099999999998
+  },
+  "Iainarchaeota": {
+    "node": 488,
+    "genome_size": 953.21,
+    "n_presence_gt0p5": 745,
+    "sum_copies": 895.0999999999999,
+    "expected_copies": 895.0999999999999
+  },
+  "Micrarchaeota": {
+    "node": 506,
+    "genome_size": 677.59,
+    "n_presence_gt0p5": 616,
+    "sum_copies": 773.42,
+    "expected_copies": 773.42
+  },
+  "Cluster1": {
+    "node": 509,
+    "genome_size": 1675.71,
+    "n_presence_gt0p5": 1485,
+    "sum_copies": 1872.65,
+    "expected_copies": 1872.65
+  },
+  "DPANN": {
+    "node": 510,
+    "genome_size": 2094.13,
+    "n_presence_gt0p5": 1928,
+    "sum_copies": 2297.51,
+    "expected_copies": 2297.51
+  },
+  "LACA(root)": {
+    "node": 512,
+    "genome_size": 1115.3400000000001,
+    "n_presence_gt0p5": 776,
+    "sum_copies": 1285.96,
+    "expected_copies": 1285.96
+  }
+}
