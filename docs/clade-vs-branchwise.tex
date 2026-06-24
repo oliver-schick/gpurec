@@ -34,9 +34,9 @@ That variation has a clear and interpretable structure (Figure~\ref{fig:rates}).
 and transfer rates are essentially \emph{clade-constant}: within each named clade the
 per-branch estimates scarcely depart from a single value (clade membership explains
 $R^2\!\approx\!0.94$ of their variance). Loss is markedly less clade-structured
-($R^2\!\approx\!0.38$), with the largest departures along the deep backbone rather than within
-the well-sampled clades. Biologically, gene gain (duplication, transfer) is well summarised by
-one rate per clade, whereas gene loss is more branch-idiosyncratic.
+($R^2\!\approx\!0.38$): its extra variation is distributed across branches rather than captured
+by clade identity. Biologically, gene gain (duplication, transfer) is well summarised by one
+rate per clade, whereas gene loss is more branch-idiosyncratic.
 
 The reconstructed ancestral genome is robust to this added flexibility
 (Figure~\ref{fig:laca}). Of the 7{,}059 families, the branch-wise model assigns 903 to the
@@ -66,12 +66,12 @@ evidence.}
 \end{table}
 
 \begin{figure}[h]\centering
-\includegraphics[width=0.96\textwidth]{rate_violin_v2_bigtree_Eury.png}
-\caption{Per-clade duplication, loss and transfer rates (log scale, events per branch):
-the spread of free per-branch rates within each clade (violins) against the single
-clade-grouped rate (diamonds). Duplication and transfer are clade-constant
-($R^2\!\approx\!0.94$); loss departs from clade-constancy, chiefly along the backbone
-($R^2\!\approx\!0.38$).}
+\includegraphics[width=0.98\textwidth]{rate_deviation3_bigtree_Eury.png}
+\caption{Departure of each branch's fitted rate from its clade's mean rate ($\log_2$ fold;
+shared axes). Duplication and transfer form a sharp spike at zero --- the per-branch
+estimates scarcely leave their clade mean, so clade membership explains $R^2\!\approx\!0.94$
+of the variance --- whereas loss is broad ($R^2\!\approx\!0.38$), i.e.\ branch-specific. Gene
+gain (duplication, transfer) is well summarised by one rate per clade; gene loss is not.}
 \label{fig:rates}
 \end{figure}
 
