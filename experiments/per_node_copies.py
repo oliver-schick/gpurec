@@ -137,7 +137,8 @@ def main():
     _mtb = torch.exp2(mt)
     if _mtb.dim() == 1:
         _mtb = _mtb.unsqueeze(1)                                            # per-DONOR-row rescale
-    transfer_lin = (transfer_mat * _mtb).cpu().numpy()                      # [S,S] linear p^T(d->r)
+    transfer_lin_t = (transfer_mat * _mtb)                                  # [S,S] GPU linear p^T(d->r)
+    transfer_lin = transfer_lin_t.cpu().numpy()                             # numpy copy for the C++ sampler
     E_out = E_fixed_point(species_helpers=sp_gpu, log_pS=log_pS, log_pD=log_pD, log_pL=log_pL,
                           transfer_mat=transfer_mat, max_transfer_mat=mt, max_iters=4000,
                           tolerance=1e-10, warm_start_E=None, dtype=dtype, device=dev,
@@ -173,19 +174,23 @@ def main():
     for i0 in range(0, F, CHUNK):
         batch = fams[i0:i0 + CHUNK]
         wl_b, rc_b = _build_wave_layout(batch, dev, dtype)
-        Pi_b = Pi_wave_forward(
+        Pi_t = Pi_wave_forward(
             wave_layout=wl_b, species_helpers=sp_gpu, E=E_out["E"], Ebar=E_out["E_bar"],
             E_s1=E_out["E_s1"], E_s2=E_out["E_s2"], log_pS=log_pS, log_pD=log_pD, log_pL=log_pL,
             transfer_mat=transfer_mat, max_transfer_mat=mt, device=dev, dtype=dtype,
-            pibar_mode="dense", leaf_obs_log=leaf_obs)["Pi"].cpu().numpy()      # [C_batch, S] log2
+            pibar_mode="dense", leaf_obs_log=leaf_obs)["Pi"]                    # [sumC, S] log2 (GPU)
+        # Pibar = log2(exp2(Pi-m) @ transfer_lin^T) + m, batched on the GPU for the whole chunk
+        # (was an O(C*S^2) numpy matmul PER FAMILY -- the 100-sample bottleneck).
+        mx_t = Pi_t.amax(dim=1, keepdim=True)
+        Pibar_t = torch.log2(torch.exp2(Pi_t - mx_t) @ transfer_lin_t.transpose(0, 1)) + mx_t
+        Pi_b = Pi_t.cpu().numpy(); Pibar_b = Pibar_t.cpu().numpy()
         offs = np.cumsum([0] + [int(f["C"]) for f in batch])
         rc_bn = rc_b.cpu().numpy() if torch.is_tensor(rc_b) else np.asarray(rc_b)
         for j, fam in enumerate(batch):
             f = i0 + j
             off = int(offs[j]); Cf = int(fam["C"])
             Pi_f = Pi_b[off:off + Cf]
-            mx = Pi_f.max(axis=1, keepdims=True)
-            Pibar_f = np.log2(np.exp2(Pi_f - mx) @ transfer_lin.T) + mx
+            Pibar_f = Pibar_b[off:off + Cf]
             splits_of, cls, root_id = _decode_family(fam)
             for L in cls.values():                    # observed ground truth from the data
                 obs_genes[L] += 1
