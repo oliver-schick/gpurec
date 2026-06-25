@@ -34,7 +34,16 @@ export TORCH_EXTENSIONS_DIR="$GPUREC_DIR/.torch_ext"
 [ -d ".venv/bin" ] && export PATH="$GPUREC_DIR/.venv/bin:$PATH"
 
 module load "$PY_MODULE" 2>/dev/null || echo "WARN: module load $PY_MODULE failed"
-if module load gcc/11.2.1 2>/dev/null; then
+# gcc/14.2.0 is a FULL install under shared /apps/unit/SzollosiU (available on ALL
+# nodes, unlike node-local devtoolset-11 gcc/11.2.1 which is often missing on
+# compute nodes). Its lib64 ships a modern libstdc++ (CXXABI_1.3.9+) needed both to
+# run the venv numpy and to JIT-build recon_sampler on the compute node. preprocess
+# _cpp.so (devtoolset-built) still loads against this newer libstdc++ (superset).
+if module load gcc/14.2.0 2>/dev/null; then
+  GCC14LIB=/apps/unit/SzollosiU/gcc/14.2.0/lib64
+  [ -d "$GCC14LIB" ] && export LD_LIBRARY_PATH="$GCC14LIB:${LD_LIBRARY_PATH:-}"
+  echo "=== gcc: $(g++ --version 2>&1 | head -1) ==="
+elif module load gcc/11.2.1 2>/dev/null; then
   GCCLIB="$(dirname "$(gcc -print-file-name=libstdc++.so.6 2>/dev/null)")"
   [ -d "$GCCLIB" ] && export LD_LIBRARY_PATH="$GCCLIB:${LD_LIBRARY_PATH:-}"
 fi
@@ -56,6 +65,13 @@ ok = torch.cuda.is_available()
 print("torch", torch.__version__, "| cuda", torch.version.cuda, "| available", ok)
 sys.exit(0 if ok else 2)
 PYEOF
+
+# Force-build recon_sampler on THIS compute node up front (fail fast, then cache)
+# so a toolchain problem surfaces before the 7059-family GPU forward, not after.
+echo "=== pre-build recon_sampler on $(hostname) ==="
+PYTHONPATH=. "$PY" -c "from gpurec.core.sampler_cpp import _ext; _ext(); print('recon_sampler build OK')" \
+  || { echo "ERROR: recon_sampler JIT build failed on this compute node"; exit 1; }
+touch .torch_ext/recon_sampler/recon_sampler.so 2>/dev/null || true
 
 mkdir -p "$OUT_DIR"
 
