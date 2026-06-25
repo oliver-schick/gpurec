@@ -162,6 +162,12 @@ def _run(args, data_dir: Path):
         if not ale_paths:
             raise SystemExit(f"no .ale files under {data_dir / args.ccp_dir} "
                              f"(run ALEobserve on the ufboots first)")
+    if getattr(args, "ale_list", None):                        # STAGE B: subset to a component's families
+        want = {Path(ln.strip()).name for ln in Path(args.ale_list).read_text().splitlines() if ln.strip()}
+        ale_paths = [p for p in ale_paths if Path(p).name in want]
+        if not ale_paths:
+            raise SystemExit(f"--ale-list {args.ale_list} matched 0 .ale files")
+        print(f"  [ale-list] subset to {len(ale_paths)} families (of {len(want)} requested)", flush=True)
     if getattr(args, "shuffle_seed", -1) >= 0:                  # random train/test split
         import random as _rnd
         _rnd.Random(args.shuffle_seed).shuffle(ale_paths)
@@ -653,6 +659,9 @@ def _parse_args(argv=None):
                    help="GENERAL: explicit fraction_missing file (else the --data-dir "
                         "default location is used).")
     p.add_argument("--data-dir", default=DEFAULT_DATA_DIR)
+    p.add_argument("--ale-list", default=None,
+                   help="Stage B: restrict families to the .ale paths listed in this file "
+                        "(one per line; matched by basename). Subsets families to one component.")
     p.add_argument("--ccp-dir", default=DEFAULT_CCP_SUBDIR,
                    help="dir (under --data-dir) of ALEobserve .ale CCPs; "
                         f"default {DEFAULT_CCP_SUBDIR}")

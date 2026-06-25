@@ -23,6 +23,8 @@ def main():
     ap.add_argument("--root", required=True)
     ap.add_argument("--sidecar", required=True)
     ap.add_argument("--fm-mode", default="e-only")
+    ap.add_argument("--ale-list", default=None,
+                    help="Stage B: restrict to the .ale paths in this file (basename match).")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
     if not torch.cuda.is_available():
@@ -44,7 +46,13 @@ def main():
         log_pO = om - torch.logsumexp(om * _LN2, 0) / _LN2
     else:
         log_pO = torch.full((S,), -math.log2(S), dtype=dtype, device=dev)
-    fams, names = _load_families_named(ALE, s2i, min_species=1, dtype=dtype)
+    ale_paths = ALE
+    if args.ale_list:
+        want = {Path(ln.strip()).name for ln in Path(args.ale_list).read_text().splitlines() if ln.strip()}
+        ale_paths = [p for p in ALE if Path(p).name in want]
+        if not ale_paths:
+            raise SystemExit(f"--ale-list {args.ale_list} matched 0 .ale files")
+    fams, names = _load_families_named(ale_paths, s2i, min_species=1, dtype=dtype)
     wl, rc = _build_wave_layout(fams, dev, dtype)
     sp_gpu, anc = _sp_helpers_for_uniform(sp, dev, dtype)
     urm = torch.log2(sp["Recipients_mat"]).max(dim=-1).values.to(device=dev, dtype=dtype)

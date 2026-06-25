@@ -76,6 +76,8 @@ def main():
     ap.add_argument("--validate-n", type=int, default=0,
                     help="run BOTH engines on the first N families and report agreement")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--ale-list", default=None,
+                    help="Stage B: restrict families to the .ale paths in this file (basename match).")
     args = ap.parse_args()
     if not torch.cuda.is_available():
         raise SystemExit("CUDA required (dense forward).")
@@ -139,8 +141,15 @@ def main():
         else:
             log_pO = torch.full((S,), -math.log2(S), dtype=dtype, device=dev)
 
+    ale_paths = ALE
+    if args.ale_list:
+        want = {Path(ln.strip()).name for ln in Path(args.ale_list).read_text().splitlines() if ln.strip()}
+        ale_paths = [p for p in ALE if Path(p).name in want]
+        if not ale_paths:
+            raise SystemExit(f"--ale-list {args.ale_list} matched 0 .ale files")
+        print(f"  [ale-list] subset to {len(ale_paths)} families", flush=True)
     lim = args.families
-    fams, _ = _load_families(ALE, s2i, min_species=1, dtype=dtype, limit=lim)
+    fams, _ = _load_families(ale_paths, s2i, min_species=1, dtype=dtype, limit=lim)
     F = len(fams)
     # wave layout + dense forward are built PER CHUNK in the loop below (the all-families
     # dense forward overflows GPU memory at S=513 / 7059 families).
