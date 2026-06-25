@@ -338,6 +338,31 @@ def _run(args, data_dir: Path):
     omega_init = None
     origination_l2 = 0.0
     origination_info = {"origination": args.origination}
+    if args.origination == "fixed":
+        # HOLD origination at the paper's structured per-branch O while only D/L/T
+        # optimize. Read p^O from an AleRax model_parameters.txt (e.g. DTL_br1_O Eury,
+        # which gives DPANN a real origination); omega_init = log2(p^O) -> the optimizer
+        # softmax-normalizes it to exactly that distribution, held constant.
+        from clade_groups import branch_params_from_alerax
+        if not args.origination_fixed_from:
+            raise SystemExit("--origination fixed requires --origination-fixed-from <model_parameters.txt>")
+        _fx_tree = args.origination_fixed_atree or str(tree_path)
+        _fx_rb, _fx_ob, _fx_diag = branch_params_from_alerax(
+            species_helpers, _fx_tree, args.origination_fixed_from)
+        if _fx_ob is None:
+            raise SystemExit(f"--origination-fixed-from {args.origination_fixed_from} has no "
+                             "origination column (need a DTL_br1_O-style model with O).")
+        omega_init = torch.log2(_fx_ob.clamp_min(1e-12)).to(device=device, dtype=dtype)
+        _pO_fx = _fx_ob / _fx_ob.sum()
+        origination_info.update({
+            "origination": "fixed",
+            "fixed_from": str(args.origination_fixed_from),
+            "n_unmapped": len(_fx_diag.get("unmapped", [])),
+            "pO_min": float(_pO_fx.min()), "pO_max": float(_pO_fx.max())})
+        print(f"      FIXED origination from {Path(args.origination_fixed_from).name}: "
+              f"p^O in [{float(_pO_fx.min()):.2e}, {float(_pO_fx.max()):.3f}], "
+              f"unmapped={len(_fx_diag.get('unmapped', []))} (HELD while D/L/T optimize)",
+              flush=True)
     if args.origination == "optimize":
         omega_init = (_rates_omega_init if _rates_omega_init is not None
                       else _alerax_omega_init if _alerax_omega_init is not None
@@ -500,6 +525,13 @@ def _run(args, data_dir: Path):
                                  "origination_prob": origination_prob.tolist()})
         if "origination_prior" in result:
             origination_info["prior"] = result["origination_prior"]
+    elif args.origination == "fixed":
+        # held-fixed structured O: record it in the sidecar so per_node_copies reads
+        # the same origination the theta fit was conditioned on.
+        origination_prob = result["origination"]
+        omega = result["omega"]
+        origination_info.update({"omega_log2": omega.tolist(),
+                                 "origination_prob": origination_prob.tolist()})
     else:
         origination_prob = torch.full((S,), 1.0 / S, dtype=torch.float64)
     nll = float(result["negative_log_likelihood"])
@@ -523,17 +555,18 @@ def _run(args, data_dir: Path):
         c = rates[:, col]
         print(f"  {lab}: min={float(c.min()):.6g} median={float(c.median()):.6g} "
               f"max={float(c.max()):.6g}")
-    if args.origination == "optimize":
+    if args.origination in ("optimize", "fixed"):
         o = origination_prob
         print(f"  O: min={float(o.min()):.6g} median={float(o.median()):.6g} "
-              f"max={float(o.max()):.6g} (sum={float(o.sum()):.6g})")
+              f"max={float(o.max()):.6g} (sum={float(o.sum()):.6g})"
+              + ("  [FIXED]" if args.origination == "fixed" else ""))
     print(f"{'=' * 60}")
 
     # 5. write rates (AleRax-comparable) + JSON sidecar.
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w") as fh:
-        if args.origination == "optimize":
+        if args.origination in ("optimize", "fixed"):
             fh.write("# node D L T O\n")
             for s in range(S):
                 fh.write(f"{names[s]} {float(rates[s,0]):.10g} {float(rates[s,1]):.10g} "
@@ -618,7 +651,14 @@ def _parse_args(argv=None):
                         "0=uniform. Multi-start over a few scales + pick the best logL.")
     p.add_argument("--fm-mode", default="off", choices=["both", "e-only", "off"])
     p.add_argument("--no-fraction-missing", action="store_true")
-    p.add_argument("--origination", default="uniform", choices=["uniform", "optimize"])
+    p.add_argument("--origination", default="uniform", choices=["uniform", "optimize", "fixed"])
+    p.add_argument("--origination-fixed-from", default=None,
+                   help="With --origination fixed: AleRax model_parameters.txt to read the "
+                        "per-branch origination from (HELD FIXED while D/L/T optimize). E.g. the "
+                        "paper's DTL_br1_O Eury model_parameters to test whether the DPANN transfer "
+                        "inflation collapses once O can't trade against T.")
+    p.add_argument("--origination-fixed-atree", default=None,
+                   help="Labelled tree matching --origination-fixed-from (default: the --root tree).")
     p.add_argument("--origination-l2", type=float, default=0.0,
                    help="L2/ridge on origination logits (lambda*sum(omega^2), "
                         "shrink p^O toward uniform). 0=free. p^O is a softmax "

@@ -287,9 +287,22 @@ def optimize_theta_wave(
     # 'optimize': a free per-branch origination log2-weight omega [S] is jointly
     #   optimised; log_pO = omega - logsumexp2(omega) is the softmax log-prob.
     from gpurec.core.likelihood import origination_log_pO as _origination_log_pO
-    if origination not in ('uniform', 'optimize'):
-        raise ValueError(f"origination must be 'uniform' or 'optimize', got {origination!r}")
+    if origination not in ('uniform', 'optimize', 'fixed'):
+        raise ValueError(f"origination must be 'uniform', 'optimize' or 'fixed', got {origination!r}")
     _opt_origination = origination == 'optimize'
+    # 'fixed': origination is held at a GIVEN per-branch distribution (e.g. the
+    # paper's structured {DPANN,Eury,TackA,rest} O) while ONLY theta (D/L/T) is
+    # optimised. omega is NOT a parameter; log_pO is a constant in the forward.
+    # Tests whether the DPANN transfer inflation (T trading against a collapsed
+    # free O) disappears once O can't move. omega_init supplies the fixed logits.
+    _fixed_origination = origination == 'fixed'
+    _fixed_log_pO = None
+    if _fixed_origination:
+        if omega_init is None:
+            raise ValueError("origination='fixed' requires omega_init (the fixed "
+                             "per-branch origination log2-weights)")
+        _fixed_omega_t = omega_init.to(device=device, dtype=dtype).reshape(-1).clone()
+        _fixed_log_pO = _origination_log_pO(_fixed_omega_t)   # constant softmax log-prob
     # Determine S (number of species branches) for the omega vector.
     _S_branches = int(species_helpers['S'])
 
@@ -710,7 +723,11 @@ def optimize_theta_wave(
         the per-family numerators + the shared (E + omega) survival denominator.
         """
         # Origination log-prob log_pO = omega - logsumexp2(omega). None -> uniform.
-        log_pO = _origination_log_pO(omega_d) if omega_d is not None else None
+        # 'fixed': a precomputed constant log_pO (omega is not a parameter).
+        if _fixed_origination:
+            log_pO = _fixed_log_pO
+        else:
+            log_pO = _origination_log_pO(omega_d) if omega_d is not None else None
         if wave_layout_batches is not None:
             if selected_batch_ids is None:
                 layout_batches = wave_layout_batches
@@ -872,7 +889,7 @@ def optimize_theta_wave(
             # implicit solve. Mirrors compute_log_likelihood EXACTLY:
             #   NLL_f = -(logsumexp2(root_Pi_f + log_pO) - logsumexp2(log2(1-exp2(E)) + log_pO))
             grad_omega = None
-            if log_pO is not None:
+            if log_pO is not None and omega_d is not None:   # optimize-mode only; fixed/uniform skip
                 from gpurec.core.log2_utils import logsumexp2 as _lse2
                 from gpurec.core.log2_utils import _safe_log2_internal as _slog2
                 root_pi_all = torch.cat(root_pi_rows, dim=0)  # [n_fam_total, S]
@@ -1175,6 +1192,12 @@ def optimize_theta_wave(
                 result_dict["origination_prior"] = {
                     "type": "l2", "lambda": _orig_l2,
                 }
+        elif _fixed_origination:
+            # Held-fixed origination: report the constant omega + p^O so the
+            # sidecar records what O the theta fit was conditioned on.
+            result_dict["omega"] = _fixed_omega_t.detach().cpu()
+            result_dict["origination"] = torch.exp2(_fixed_log_pO).detach().cpu()
+            result_dict["origination_strategy"] = "fixed"
         return result_dict
 
     # --- Iterative optimizers (adam, sgd) ---
