@@ -31,13 +31,17 @@ for SO in .torch_ext/preprocess_cpp/preprocess_cpp.so .torch_ext/recon_sampler/r
 PY=".venv/bin/python"; [ -x "$PY" ] || PY="python3.11"
 mkdir -p "$OUTDIR"
 PONPZ="$RFXDIR/rfx_${ROOT}.npz"
-RATES="$OUTDIR/stageB_${ROOT}.rates"; PERFAM="$OUTDIR/perfam_${ROOT}.json"
+RATES="$OUTDIR/stageB_${ROOT}.rates"; PERFAM="$OUTDIR/perfam_${ROOT}.json"; INIT="$OUTDIR/init_${ROOT}.json"
 echo "=== STAGE B fit+eval root=$ROOT on $(hostname) $(date)  PONPZ=$PONPZ ==="
 [ -s "$PONPZ" ] || { echo "MISSING $PONPZ"; exit 1; }
 
 if [ ! -s "$RATES.json" ]; then
+  # WARM START FROM STAGE A: per-branch theta init = the rfx rate centroid (NOT from scratch --
+  # that would re-enter the multi-basin landscape Stage A avoided). p^O pinned separately.
+  PYTHONPATH=. "$PY" experiments/rfx_init_rates.py --rfx-npz "$PONPZ" --out "$INIT" \
+    || { echo "[$ROOT] INIT FAILED"; exit 1; }
   PYTHONPATH=. "$PY" experiments/run_undine_branchwise.py --root "$ROOT" --out "$RATES" \
-    --origination fixed --origination-fixed-po-npz "$PONPZ" \
+    --origination fixed --origination-fixed-po-npz "$PONPZ" --init-from-rates "$INIT" \
     --prior brownian --brownian-sigma "$SIGMA" --fm-mode e-only --optimizer lbfgs \
     --steps "$STEPS" --family-batch-size "$FBS" 2>&1 | tail -6 || { echo "[$ROOT] FIT FAILED"; exit 1; }
 fi
