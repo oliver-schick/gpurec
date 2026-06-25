@@ -47,9 +47,11 @@ def _csr_splits(splits_of, C):
 
 
 def sample_accumulate_cpp(fwd, n_samples: int, seed: int = 0,
-                          n_threads: int = 0) -> Tuple[np.ndarray, np.ndarray]:
-    """Return (presence[S], copies[S]) accumulated over n_samples for one family.
-    presence/copies are SUMS over samples (divide by n_samples for expectations)."""
+                          n_threads: int = 0):
+    """Return per-species accumulators (SUMS over n_samples; divide by n_samples for E[·]):
+    a dict with presence, copies, orig, dup, transfer, loss, spec -- each [S].
+    presence = #samples occupying s; copies = #{S,SL,leaf}; orig/dup/transfer/loss/spec
+    are per-branch event counts (O, D, T, L, S) matching AleRax's perspecies tally."""
     C = int(fwd.Pi.shape[0]); S = int(fwd.S)
     sptr, sL, sR, slp = _csr_splits(fwd.splits_of, C)
     leafsp = np.full(C, -1, dtype=np.int64)
@@ -57,10 +59,11 @@ def sample_accumulate_cpp(fwd, n_samples: int, seed: int = 0,
         leafsp[c] = sp
     t = lambda a, dt: torch.as_tensor(np.ascontiguousarray(a), dtype=dt)  # noqa: E731
     f64, i64 = torch.float64, torch.int64
-    pres, cop = _ext().sample_accumulate(
+    res = _ext().sample_accumulate(
         t(fwd.Pi, f64), t(fwd.Pibar, f64), t(fwd.E, f64), t(fwd.Ebar, f64),
         t(fwd.log_pS, f64), t(fwd.log_pD, f64), t(fwd.log_pO, f64), t(fwd.transfer_mat, f64),
         t(sptr, i64), t(sL, i64), t(sR, i64), t(slp, f64),
         t(leafsp, i64), t(fwd.sp_child1, i64), t(fwd.sp_child2, i64),
         int(fwd.root_clade_id), C, S, int(n_samples), int(seed), int(n_threads))
-    return pres.numpy(), cop.numpy()
+    keys = ("presence", "copies", "orig", "dup", "transfer", "loss", "spec")
+    return {k: r.numpy() for k, r in zip(keys, res)}

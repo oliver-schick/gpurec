@@ -86,12 +86,14 @@ inline int sample_origination(const Fam &f, Rng &rng) {
   return f.S - 1;
 }
 
+// per-thread accumulators (each [S]); orig[] is filled in the sample loop at e0.
+struct Acc { double *pres, *cop, *dup, *trn, *los, *spc; };
+
 // recursive backtrace; `scratch` is reused (saved/restored around recursion).
 void backtrace(const Fam &f, int cid, int s, Rng &rng, std::vector<Act> &scratch,
-               std::vector<int64_t> &stamp, int64_t sample_id,
-               double *presence, double *copies) {
+               std::vector<int64_t> &stamp, int64_t sample_id, Acc &acc) {
   const int S = f.S;
-  if (stamp[s] != sample_id) { stamp[s] = sample_id; presence[s] += 1.0; }  // occupied
+  if (stamp[s] != sample_id) { stamp[s] = sample_id; acc.pres[s] += 1.0; }  // occupied
   const int s1 = (int)f.c1[s], s2 = (int)f.c2[s];
   const bool has_children = (s1 != S);
 
@@ -126,30 +128,35 @@ void backtrace(const Fam &f, int cid, int s, Rng &rng, std::vector<Act> &scratch
 
     double total = 0.0;
     for (size_t i = base; i < scratch.size(); i++) total += exp2_(scratch[i].lw - maxlw);
-    double u = rng.uniform() * total, acc = 0.0;
+    double u = rng.uniform() * total, cum = 0.0;
     size_t pick = scratch.size() - 1;
-    for (size_t i = base; i < scratch.size(); i++) { acc += exp2_(scratch[i].lw - maxlw); if (u <= acc) { pick = i; break; } }
+    for (size_t i = base; i < scratch.size(); i++) { cum += exp2_(scratch[i].lw - maxlw); if (u <= cum) { pick = i; break; } }
     Act a = scratch[pick];
     scratch.resize(base);                          // pop before recursing
 
     if (a.kind == K_DL || a.kind == K_TLLOST) continue;   // self-loop: resample same cell
     switch (a.kind) {
-      case K_LEAF:   copies[s] += 1.0; return;
-      case K_S:      copies[s] += 1.0;
-                     backtrace(f, a.L, a.sa, rng, scratch, stamp, sample_id, presence, copies);
-                     backtrace(f, a.R, a.sb, rng, scratch, stamp, sample_id, presence, copies); return;
-      case K_SL:     copies[s] += 1.0;
-                     backtrace(f, cid, a.sa, rng, scratch, stamp, sample_id, presence, copies); return;
-      case K_D:      backtrace(f, a.L, s, rng, scratch, stamp, sample_id, presence, copies);
-                     backtrace(f, a.R, s, rng, scratch, stamp, sample_id, presence, copies); return;
-      case K_TR: {   backtrace(f, a.L, s, rng, scratch, stamp, sample_id, presence, copies);
+      case K_LEAF:   acc.cop[s] += 1.0; return;
+      case K_S:      acc.cop[s] += 1.0; acc.spc[s] += 1.0;
+                     backtrace(f, a.L, a.sa, rng, scratch, stamp, sample_id, acc);
+                     backtrace(f, a.R, a.sb, rng, scratch, stamp, sample_id, acc); return;
+      case K_SL:     acc.cop[s] += 1.0; acc.spc[s] += 1.0;
+                     acc.los[(a.sa == s1) ? s2 : s1] += 1.0;          // loss of non-surviving child
+                     backtrace(f, cid, a.sa, rng, scratch, stamp, sample_id, acc); return;
+      case K_D:      acc.dup[s] += 1.0;
+                     backtrace(f, a.L, s, rng, scratch, stamp, sample_id, acc);
+                     backtrace(f, a.R, s, rng, scratch, stamp, sample_id, acc); return;
+      case K_TR: {   acc.trn[s] += 1.0;
+                     backtrace(f, a.L, s, rng, scratch, stamp, sample_id, acc);
                      int rr = sample_recipient(f, s, a.R, rng);
-                     backtrace(f, a.R, rr, rng, scratch, stamp, sample_id, presence, copies); return; }
-      case K_TL: {   backtrace(f, a.R, s, rng, scratch, stamp, sample_id, presence, copies);
+                     backtrace(f, a.R, rr, rng, scratch, stamp, sample_id, acc); return; }
+      case K_TL: {   acc.trn[s] += 1.0;
+                     backtrace(f, a.R, s, rng, scratch, stamp, sample_id, acc);
                      int rr = sample_recipient(f, s, a.L, rng);
-                     backtrace(f, a.L, rr, rng, scratch, stamp, sample_id, presence, copies); return; }
-      case K_TLMOVE:{int rr = sample_recipient(f, s, cid, rng);
-                     backtrace(f, cid, rr, rng, scratch, stamp, sample_id, presence, copies); return; }
+                     backtrace(f, a.L, rr, rng, scratch, stamp, sample_id, acc); return; }
+      case K_TLMOVE:{acc.trn[s] += 1.0; acc.los[s] += 1.0;            // source lost at s
+                     int rr = sample_recipient(f, s, cid, rng);
+                     backtrace(f, cid, rr, rng, scratch, stamp, sample_id, acc); return; }
       default: return;
     }
   }
@@ -186,9 +193,11 @@ std::vector<torch::Tensor> sample_accumulate(
     f.pimax[c] = mx;
   }
 
-  auto presence = torch::zeros({S}, torch::kFloat64);
-  auto copies = torch::zeros({S}, torch::kFloat64);
-  double *pres_g = presence.data_ptr<double>(), *cop_g = copies.data_ptr<double>();
+  auto mk = [&]() { return torch::zeros({S}, torch::kFloat64); };
+  auto presence = mk(), copies = mk(), orig = mk(), dup = mk(), trn = mk(), los = mk(), spc = mk();
+  double *pres_g = presence.data_ptr<double>(), *cop_g = copies.data_ptr<double>(),
+         *org_g = orig.data_ptr<double>(), *dup_g = dup.data_ptr<double>(),
+         *trn_g = trn.data_ptr<double>(), *los_g = los.data_ptr<double>(), *spc_g = spc.data_ptr<double>();
 
 #ifdef _OPENMP
   if (n_threads > 0) omp_set_num_threads((int)n_threads);
@@ -199,25 +208,31 @@ std::vector<torch::Tensor> sample_accumulate(
 #ifdef _OPENMP
     tid = omp_get_thread_num();
 #endif
-    std::vector<double> pres_t(S, 0.0), cop_t(S, 0.0);
+    std::vector<double> pres_t(S, 0.0), cop_t(S, 0.0), org_t(S, 0.0), dup_t(S, 0.0),
+                        trn_t(S, 0.0), los_t(S, 0.0), spc_t(S, 0.0);
     std::vector<int64_t> stamp(S, 0);
     std::vector<Act> scratch; scratch.reserve(256);
     Rng rng; rng.seed((uint64_t)seed * 2654435761ULL + (uint64_t)tid + 1);
+    Acc acc{pres_t.data(), cop_t.data(), dup_t.data(), trn_t.data(), los_t.data(), spc_t.data()};
 #pragma omp for schedule(static)
     for (int64_t smp = 0; smp < n_samples; smp++) {
       int64_t sid = smp + 1;
       int e0 = sample_origination(f, rng);
-      backtrace(f, f.root, e0, rng, scratch, stamp, sid, pres_t.data(), cop_t.data());
+      org_t[e0] += 1.0;                                  // origination event at e0
+      backtrace(f, f.root, e0, rng, scratch, stamp, sid, acc);
     }
 #pragma omp critical
     {
-      for (int s = 0; s < (int)S; s++) { pres_g[s] += pres_t[s]; cop_g[s] += cop_t[s]; }
+      for (int s = 0; s < (int)S; s++) {
+        pres_g[s] += pres_t[s]; cop_g[s] += cop_t[s]; org_g[s] += org_t[s];
+        dup_g[s] += dup_t[s]; trn_g[s] += trn_t[s]; los_g[s] += los_t[s]; spc_g[s] += spc_t[s];
+      }
     }
   }
-  return {presence, copies};
+  return {presence, copies, orig, dup, trn, los, spc};   // [S] each: presence, copies, O, D, T, L, S
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("sample_accumulate", &sample_accumulate,
-        "stochastic-backtrack reconciliation sampler: returns (presence[S], copies[S])");
+        "backtrack sampler: returns (presence, copies, orig, dup, transfer, loss, spec)[S]");
 }
