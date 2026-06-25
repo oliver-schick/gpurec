@@ -199,11 +199,56 @@ def regime_mixture_em(npz_dir, iters=400):
     rb = int(d["rb"]); names = list(d["names"])
     lab2n = {str(k): int(v) for k, v in zip(d["labels"], d["label_nodes"])}
     K = len(files); F, S = rps[0].shape
+
+    # ---- GPU path (torch): the [K,F,S] logsumexp/softmax EM in seconds on the A100 ----
+    try:
+        import torch
+        use_gpu = torch.cuda.is_available()
+    except Exception:  # noqa: BLE001
+        use_gpu = False
+    if use_gpu:
+        dev = torch.device("cuda"); LN2 = math.log(2.0)
+        RP = torch.stack([torch.from_numpy(r) for r in rps]).to(dev, torch.float32)   # [K,F,S] log2
+        omE = torch.stack([torch.from_numpy((np.maximum(1.0 - np.exp2(E), 1e-300)).astype(np.float32))
+                           for E in Es]).to(dev)                                       # [K,S]
+        lse2 = lambda x, dim, kd=False: torch.logsumexp(x * LN2, dim=dim, keepdim=kd) / LN2  # noqa: E731
+        # single-regime baselines (all K in parallel, own origination each)
+        lpO = torch.full((K, S), -math.log2(S), device=dev)
+        for _ in range(200):
+            m = lpO[:, None, :] + RP                                                   # [K,F,S]
+            pbs = torch.exp2(m - lse2(m, 2, True))
+            Of = pbs.sum(1); lpO = torch.log2((Of / Of.sum(1, keepdim=True)).clamp_min(1e-30))
+        m = lpO[:, None, :] + RP
+        surv = torch.log2((torch.exp2(lpO) * omE).sum(1).clamp_min(1e-30))             # [K]
+        base_ll = (lse2(m, 2) - surv[:, None]).sum(1)                                  # [K]
+        best_single = int(base_ll.argmax().item())
+        base = [(float(base_ll[k]), None) for k in range(K)]
+        # mixture EM
+        log_pi = torch.full((K,), -math.log2(K), device=dev)
+        log_pO = torch.full((K, S), -math.log2(S), device=dev); prev = -1e30; nit = iters
+        for it in range(iters):
+            m = log_pO[:, None, :] + RP                                                # [K,F,S]
+            num = lse2(m, 2)                                                           # [K,F]
+            surv = torch.log2((torch.exp2(log_pO) * omE).sum(1).clamp_min(1e-30))      # [K]
+            Lk = (num - surv[:, None]).T                                              # [F,K]
+            joint = log_pi[None, :] + Lk
+            ll = float(lse2(joint, 1).sum().item())
+            gamma = torch.exp2(joint - lse2(joint, 1, True))                          # [F,K]
+            Nk = gamma.sum(0); log_pi = torch.log2((Nk / F).clamp_min(1e-30))
+            pbs = torch.exp2(m - lse2(m, 2, True))                                    # [K,F,S]
+            Ok = (gamma.T[:, :, None] * pbs).sum(1)                                   # [K,S]
+            log_pO = torch.log2((Ok / Ok.sum(1, keepdim=True)).clamp_min(1e-30))
+            if abs(ll - prev) < 1e-2:
+                nit = it + 1; break
+            prev = ll
+        return dict(log_pi=log_pi.cpu().numpy(), log_pO=log_pO.cpu().numpy(),
+                    gamma=gamma.cpu().numpy(), ll=ll, nit=nit, dlts=dlts, rb=rb, names=names,
+                    lab2n=lab2n, base=base, best_single=best_single, K=K, F=F)
+
+    # ---- CPU fallback (numpy) ----
     oneMinusE = [np.maximum(1.0 - np.exp2(E), 1e-300) for E in Es]
-    # single-regime baselines
     base = [_single_regime_logL(rps[k], oneMinusE[k]) for k in range(K)]
     best_single = max(range(K), key=lambda k: base[k][0])
-
     log_pi = np.full(K, -math.log2(K))
     log_pO = np.full((K, S), -math.log2(S)); prev = -np.inf; nit = iters
     for it in range(iters):
@@ -215,7 +260,7 @@ def regime_mixture_em(npz_dir, iters=400):
             Lk[:, k] = num - surv
         joint = log_pi[None, :] + Lk
         ll = float(_lse2(joint, axis=1).sum())
-        gamma = np.exp2(joint - _lse2(joint, axis=1, keepdims=True))     # [F,K]
+        gamma = np.exp2(joint - _lse2(joint, axis=1, keepdims=True))
         Nk = gamma.sum(0); log_pi = np.log2(np.maximum(Nk / F, 1e-300))
         for k in range(K):
             m = (log_pO[k][None, :] + rps[k]).astype(np.float64)
