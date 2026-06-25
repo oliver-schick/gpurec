@@ -53,7 +53,6 @@ def main():
         if not ale_paths:
             raise SystemExit(f"--ale-list {args.ale_list} matched 0 .ale files")
     fams, names = _load_families_named(ale_paths, s2i, min_species=1, dtype=dtype)
-    wl, rc = _build_wave_layout(fams, dev, dtype)
     sp_gpu, anc = _sp_helpers_for_uniform(sp, dev, dtype)
     urm = torch.log2(sp["Recipients_mat"]).max(dim=-1).values.to(device=dev, dtype=dtype)
     leaf_E = None; leaf_obs = None
@@ -66,12 +65,18 @@ def main():
                           transfer_mat=tm, max_transfer_mat=mt, max_iters=4000, tolerance=1e-11,
                           warm_start_E=None, dtype=dtype, device=dev, pibar_mode="uniform",
                           ancestors_T=anc, leaf_E=leaf_E)
-    Pi_out = Pi_wave_forward(wave_layout=wl, species_helpers=sp_gpu, E=E_out["E"], Ebar=E_out["E_bar"],
-                             E_s1=E_out["E_s1"], E_s2=E_out["E_s2"], log_pS=lpS, log_pD=lpD, log_pL=lpL,
-                             transfer_mat=tm, max_transfer_mat=mt, device=dev, dtype=dtype,
-                             pibar_mode="uniform", leaf_obs_log=leaf_obs)
-    nll_log2 = compute_log_likelihood(Pi_out["Pi"], E_out["E"], rc, log_pO=log_pO)
-    logL_ln = [(-v) * _LN2 for v in nll_log2.detach().cpu().tolist()]
+    # CHUNK the forward: the all-families [sumC, S] forward overflows the int32 kernel index
+    # at S=513 / 7059 families (the fit batches at --family-batch-size; per_node_copies chunks too).
+    CHUNK = 250
+    logL_ln = []
+    for i0 in range(0, len(fams), CHUNK):
+        wl_b, rc_b = _build_wave_layout(fams[i0:i0 + CHUNK], dev, dtype)
+        Pi_b = Pi_wave_forward(wave_layout=wl_b, species_helpers=sp_gpu, E=E_out["E"], Ebar=E_out["E_bar"],
+                               E_s1=E_out["E_s1"], E_s2=E_out["E_s2"], log_pS=lpS, log_pD=lpD, log_pL=lpL,
+                               transfer_mat=tm, max_transfer_mat=mt, device=dev, dtype=dtype,
+                               pibar_mode="uniform", leaf_obs_log=leaf_obs)["Pi"]
+        nll_b = compute_log_likelihood(Pi_b, E_out["E"], rc_b, log_pO=log_pO)
+        logL_ln.extend([(-v) * _LN2 for v in nll_b.detach().cpu().tolist()])
     json.dump({"root": args.root, "names": [_norm_name(x) for x in names],
                "logL_ln": logL_ln, "total": sum(logL_ln)}, open(args.out, "w"))
     print(f"root={args.root} fams={len(names)} total={sum(logL_ln):.1f} -> {args.out}", flush=True)
