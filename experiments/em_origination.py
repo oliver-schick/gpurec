@@ -301,6 +301,64 @@ def report_regime_mixture(R):
             print(f"     {lab:16s} marg={marg[s]:.4f}")
 
 
+def shared_o_rate_mixture_em(npz_dir, iters=300, node511=511):
+    """STEP 1: per-family RATE random-effect + ONE SHARED origination (the model the
+    panel/PI converged on). Each family marginalizes over the regime grid (= discretized
+    continuous (D,L,T) random effect) but ALL families share a single p^O. Tests whether,
+    once rate is a per-family random effect, the shared origination still piles onto the
+    non-Eury ancestor 511 (the bloat driver) -- WITHOUT chasing DPANN's own O (which is
+    correctly ~0). P(f)=Σ_s p^O_s Σ_k w_k 2^{rp_k[f,s]}/surv_k.  Reports shared p^O at
+    root / 511 / DPANN, the rate-mixture w_k, and the gain vs the best single regime."""
+    import glob as _g, torch, math as _m
+    files = sorted(_g.glob(f"{npz_dir}/regime_*.npz"))
+    rps, Es, dlts = [], [], []
+    for f in files:
+        d = np.load(f, allow_pickle=True)
+        rps.append(d["root_pi"].astype(np.float32)); Es.append(d["E"].astype(np.float64)); dlts.append(tuple(float(x) for x in d["dlt"]))
+    rb = int(d["rb"]); names = list(d["names"]); lab2n = {str(k): int(v) for k, v in zip(d["labels"], d["label_nodes"])}
+    K = len(files); F, S = rps[0].shape
+    dev = torch.device("cuda"); LN2 = _m.log(2.0)
+    RP = torch.stack([torch.from_numpy(r) for r in rps]).to(dev, torch.float32)              # [K,F,S]
+    omE = torch.stack([torch.from_numpy(np.maximum(1.0 - np.exp2(E), 1e-300).astype(np.float32)) for E in Es]).to(dev)  # [K,S]
+    lse2 = lambda x, dim, kd=False: torch.logsumexp(x * LN2, dim=dim, keepdim=kd) / LN2       # noqa: E731
+    # best single-regime baseline (shared-O style, each regime its own pO)
+    lpO_s = torch.full((K, S), -_m.log2(S), device=dev)
+    for _ in range(200):
+        ms = lpO_s[:, None, :] + RP; pbs = torch.exp2(ms - lse2(ms, 2, True)); Of = pbs.sum(1); lpO_s = torch.log2((Of / Of.sum(1, keepdim=True)).clamp_min(1e-30))
+    ms = lpO_s[:, None, :] + RP; survs = torch.log2((torch.exp2(lpO_s) * omE).sum(1).clamp_min(1e-30)); base_ll = float((lse2(ms, 2) - survs[:, None]).sum(1).max())
+    # shared-O rate mixture
+    log_w = torch.full((K,), -_m.log2(K), device=dev); log_pO = torch.full((S,), -_m.log2(S), device=dev); prev = -1e30; nit = iters
+    for it in range(iters):
+        m = log_pO[None, None, :] + RP                                                        # [K,F,S]
+        num = lse2(m, 2)                                                                       # [K,F]
+        surv = torch.log2((torch.exp2(log_pO)[None, :] * omE).sum(1).clamp_min(1e-30))         # [K]
+        joint = log_w[:, None] + (num - surv[:, None])                                         # [K,F]
+        Pf = lse2(joint, 0); ll = float(Pf.sum().item())                                       # [F]
+        gamma = torch.exp2(joint - Pf[None, :])                                                # [K,F] rate resp.
+        log_w = torch.log2((gamma.mean(1)).clamp_min(1e-30))
+        pbs = torch.exp2(m - lse2(m, 2, True))                                                 # [K,F,S]
+        rho = (gamma[:, :, None] * pbs).sum(0)                                                 # [F,S] origination posterior
+        Of = rho.sum(0); log_pO = torch.log2((Of / Of.sum()).clamp_min(1e-30))                 # SHARED p^O
+        if abs(ll - prev) < 1e-2:
+            nit = it + 1; break
+        prev = ll
+    pO = torch.exp2(log_pO).cpu().numpy(); w = torch.exp2(log_w).cpu().numpy()
+    node2lab = {v: k for k, v in lab2n.items()}
+    print(f"\n========= SHARED-O RATE RANDOM-EFFECTS (step 1) =========")
+    print(f"  shared-O mixture logL={ll:.1f}   best-single={base_ll:.1f}   gain={ll-base_ll:.1f}  iters={nit}")
+    print(f"  rate-mixture weights w_k (top 8 regimes): ")
+    for k in np.argsort(-w)[:8]:
+        print(f"    D,L,T={str(tuple(round(x,3) for x in dlts[k])):22s} w={w[k]:.3f}")
+    print(f"  -- SHARED p^O (the origination profile high in the tree) --")
+    print(f"     root(LACA)  p^O={pO[rb]:.4f}")
+    print(f"     node511     p^O={pO[node511]:.4f}   <- the non-Eury ancestor (bloat driver)")
+    for lab in ("DPANN", "Undinarchaeota", "Asgard", "TackA", "Eury", "Korarchaeota"):
+        s = lab2n.get(lab)
+        if s is not None:
+            print(f"     {lab:16s} p^O={pO[s]:.4f}")
+    return dict(log_pO=log_pO.cpu().numpy(), log_w=log_w.cpu().numpy(), rb=rb)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dlt", default="0.048,0.287,0.248", help="global D,L,T (AleRax-global default)")
@@ -316,12 +374,17 @@ def main():
     ap.add_argument("--out-dir", default=None, help="dir for regime npz / mixture outputs.")
     ap.add_argument("--mixture-npz", default=None,
                     help="run the regime-mixture EM over regime_*.npz in this dir (CPU/numpy).")
+    ap.add_argument("--shared-o", action="store_true",
+                    help="with --mixture-npz: per-family rate random-effect + ONE SHARED p^O (step 1).")
     args = ap.parse_args()
 
-    # CPU-only path: regime-mixture EM over precomputed forwards (no CUDA needed).
+    # regime-mixture / shared-O rate random-effects EM over precomputed forwards.
     if args.mixture_npz:
-        R = regime_mixture_em(args.mixture_npz, iters=args.em_iters * 2)
-        report_regime_mixture(R)
+        if args.shared_o:
+            shared_o_rate_mixture_em(args.mixture_npz, iters=args.em_iters * 2)
+        else:
+            R = regime_mixture_em(args.mixture_npz, iters=args.em_iters * 2)
+            report_regime_mixture(R)
         return 0
 
     if not torch.cuda.is_available():

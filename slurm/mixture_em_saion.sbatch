@@ -27,5 +27,5 @@ fi
 if [ -x ".venv/bin/python" ]; then PY=".venv/bin/python"; else PY="python3.11"; fi
 echo "=== mixem over $OUTDIR on $(hostname) $(date) ==="
 echo "regimes present: $(ls "$OUTDIR"/regime_*.npz 2>/dev/null | wc -l)"
-PYTHONPATH=. "$PY" experiments/em_origination.py --mixture-npz "$OUTDIR" --em-iters 400 2>&1
+PYTHONPATH=. "$PY" experiments/em_origination.py --mixture-npz "$OUTDIR" --em-iters 400 ${EMARGS:-} 2>&1
 echo "=== mixem done ($(date)) ==="
