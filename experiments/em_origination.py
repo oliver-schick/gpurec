@@ -65,7 +65,65 @@ def root_pi_and_E(root, D, L, T, fm_mode, dev, dtype):
         rows.append(Pi[rc].cpu().numpy())                      # [chunk, S] root-clade Pi (log2)
     root_pi = np.concatenate(rows, 0)                           # [F, S]
     mean_E = float(torch.exp2(E["E"]).mean().item())
-    return root_pi, S, root_branch, mean_E
+    names = list(sp["names"])
+    # map labelled clades -> gpurec node index (for reading mixture components)
+    label2node = {}
+    try:
+        from clade_groups import parse_labeled_newick, species_node_leafsets
+        leafsets = species_node_leafsets(sp, S)
+        labeled = parse_labeled_newick(str(tree))
+        for s in range(S):
+            lab = labeled.get(leafsets[s])
+            if lab:
+                label2node[lab] = s
+    except Exception as e:  # noqa: BLE001
+        print(f"  [warn] clade labels unavailable: {e}", flush=True)
+    return root_pi, S, root_branch, mean_E, names, label2node
+
+
+def _lse2(x, axis=-1, keepdims=False):
+    mx = x.max(axis, keepdims=True)
+    out = np.log2(np.exp2(x - mx).sum(axis, keepdims=True)) + mx
+    return out if keepdims else out.squeeze(axis)
+
+
+def em_mixture(root_pi, S, K, iters, root_branch, seed=0, tol=1e-2):
+    """K-component MIXTURE over families for origination. Each family is a soft mixture
+    of K origination 'types', each type k carrying its own p^O_k [S]. Breaks the pooling
+    that collapses a single shared p^O onto the deep/root mode. Returns (log_pi[K],
+    log_pO[K,S], data_ll, n_iters, gamma[F,K]).
+      E: lc[f,k]=logsumexp2_s(log_pO[k,s]+Pi_f[s]); gamma=softmax_k(log_pi[k]+lc[f,k])
+      M: pi_k=mean_f gamma; p^O_k ∝ Σ_f gamma[f,k]*softmax2_s(log_pO[k]+Pi_f)
+    """
+    F = root_pi.shape[0]
+    rng = np.random.default_rng(seed)
+    log_pO = np.full((K, S), -math.log2(S))
+    log_pO[0, root_branch] += 12.0                    # component 0 seeded DEEP (root-concentrated)
+    for k in range(K):
+        if k > 0:
+            log_pO[k] = -math.log2(S) + 0.5 * rng.standard_normal(S)  # spread, jittered
+        log_pO[k] -= _lse2(log_pO[k])
+    log_pi = np.full(K, -math.log2(K))
+    ll_prev = -np.inf; nit = iters
+    for it in range(iters):
+        lc = np.empty((F, K))
+        for k in range(K):
+            lc[:, k] = _lse2(log_pO[k][None, :] + root_pi, axis=1)        # [F]
+        joint = log_pi[None, :] + lc                                      # [F,K]
+        ll = float(_lse2(joint, axis=1).sum())
+        gamma = np.exp2(joint - _lse2(joint, axis=1, keepdims=True))      # [F,K]
+        # M-step
+        Nk = gamma.sum(0)                                                 # [K] soft counts
+        log_pi = np.log2(np.maximum(Nk / F, 1e-300))
+        for k in range(K):
+            m = log_pO[k][None, :] + root_pi                             # [F,S]
+            pbs = np.exp2(m - _lse2(m, axis=1, keepdims=True))          # p(s|f,k) [F,S]
+            Ok = (gamma[:, k:k + 1] * pbs).sum(0)                        # expected orig at s in comp k
+            log_pO[k] = np.log2(np.maximum(Ok / Ok.sum(), 1e-300))
+        if abs(ll - ll_prev) < tol:
+            nit = it + 1; break
+        ll_prev = ll
+    return log_pi, log_pO, ll, nit, gamma
 
 
 def em_o(root_pi, S, iters):
@@ -92,15 +150,53 @@ def main():
     ap.add_argument("--em-iters", type=int, default=200)
     ap.add_argument("--fm-mode", default="e-only")
     ap.add_argument("--roots", default=None)
+    ap.add_argument("--mixture-k", type=int, default=1,
+                    help="K>1: fit a K-component MIXTURE over families for origination "
+                         "(breaks the single-shared-p^O pooling that collapses to the root).")
+    ap.add_argument("--mix-seed", type=int, default=0)
     args = ap.parse_args()
     if not torch.cuda.is_available():
         raise SystemExit("CUDA required.")
     dev = torch.device("cuda"); dtype = torch.float64
     D, L, T = (float(x) for x in args.dlt.split(","))
     roots = args.roots.split(",") if args.roots else ROOTS
+
+    if args.mixture_k > 1:
+        K = args.mixture_k
+        for r in roots:
+            root_pi, S, rb, mean_E, names, lab2n = root_pi_and_E(r, D, L, T, args.fm_mode, dev, dtype)
+            F = root_pi.shape[0]
+            norm = F * math.log2(max(1e-300, 1.0 - mean_E))
+            # baseline single-component
+            log_pO1, ll1, _ = em_o(root_pi, S, args.em_iters)
+            log_pi, log_pO, llK, nit, gamma = em_mixture(
+                root_pi, S, K, args.em_iters, rb, seed=args.mix_seed)
+            pi = np.exp2(log_pi); pO = np.exp2(log_pO)              # [K], [K,S]
+            marg = (pi[:, None] * pO).sum(0)                        # [S] marginal p^O
+            hard = gamma.argmax(1); cnt = np.bincount(hard, minlength=K)
+            node2lab = {v: k for k, v in lab2n.items()}
+            print(f"\n================ MIXTURE-{K} origination | root={r} ================")
+            print(f"  data_logL(ln): single={ (ll1-norm)*_LN2:.1f}   mixture-{K}={ (llK-norm)*_LN2:.1f}   "
+                  f"gain={ (llK-ll1)*_LN2:.1f} nats  (EM iters={nit})")
+            for k in range(K):
+                top = np.argsort(-pO[k])[:6]
+                desc = ", ".join(f"{node2lab.get(int(s), names[int(s)] if int(s)<len(names) else s)}"
+                                 f"={pO[k][int(s)]:.3f}" for s in top)
+                print(f"  comp{k}: pi={pi[k]:.3f}  fams(hard)={int(cnt[k])}  O@root={pO[k][rb]:.3f}  "
+                      f"top: {desc}")
+            # deep clades: marginal + per-component origination
+            print(f"  -- clade marginal p^O (single-comp DPANN was ~0); marg root_share={marg[rb]:.3f} --")
+            for lab in ("DPANN", "Undinarchaeota", "Nanoarchaeota", "Asgard", "TackA", "Eury"):
+                s = lab2n.get(lab)
+                if s is None:
+                    continue
+                pc = " ".join(f"c{k}={pO[k][s]:.4f}" for k in range(K))
+                print(f"     {lab:16s} marg={marg[s]:.4f}  [{pc}]")
+        return 0
+
     out = {}
     for r in roots:
-        root_pi, S, rb, mean_E = root_pi_and_E(r, D, L, T, args.fm_mode, dev, dtype)
+        root_pi, S, rb, mean_E, names, lab2n = root_pi_and_E(r, D, L, T, args.fm_mode, dev, dtype)
         log_pO, ll, nit = em_o(root_pi, S, args.em_iters)
         data_logL = ll - root_pi.shape[0] * math.log2(max(1e-300, 1.0 - mean_E))
         pO = np.exp2(log_pO)
