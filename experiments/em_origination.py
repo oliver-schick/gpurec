@@ -78,7 +78,8 @@ def root_pi_and_E(root, D, L, T, fm_mode, dev, dtype):
                 label2node[lab] = s
     except Exception as e:  # noqa: BLE001
         print(f"  [warn] clade labels unavailable: {e}", flush=True)
-    return root_pi, S, root_branch, mean_E, names, label2node
+    E_vec = E["E"].detach().cpu().numpy()                        # [S] log2 extinction per branch
+    return root_pi, S, root_branch, mean_E, names, label2node, E_vec
 
 
 def _lse2(x, axis=-1, keepdims=False):
@@ -144,6 +145,117 @@ def em_o(root_pi, S, iters):
     return log_pO, ll, it + 1
 
 
+# ---- MIXTURE-OVER-REGIMES SCAN ------------------------------------------------
+# A discrete mixture whose components are FIXED global-DTL "regimes" on a (D,L,T)
+# grid (= the panel's "global per-class DTL", coarsely). Each regime's forward
+# (root_pi[F,S] + extinction E[S]) is one GPU job (fan out across short-a100);
+# then a pure-numpy EM lets families soft-assign to regimes WITH per-regime
+# origination + per-regime survival. Tests whether the data wants >1 regime
+# (core/accessory) and whether that de-concentrates origination off the root.
+MIX_GRID = [(d, l, t)
+            for d in (0.03, 0.08)
+            for l in (0.1, 0.3, 0.6, 1.2, 2.4)
+            for t in (0.05, 0.15, 0.4, 1.0, 2.5)]            # 2x5x5 = 50 regimes
+
+
+def save_forward(root, idx, fm_mode, out_dir, dev, dtype):
+    D, L, T = MIX_GRID[idx]
+    root_pi, S, rb, mean_E, names, lab2n, E_vec = root_pi_and_E(root, D, L, T, fm_mode, dev, dtype)
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    out = f"{out_dir}/regime_{idx:03d}.npz"
+    np.savez_compressed(out, root_pi=root_pi.astype(np.float32), E=E_vec.astype(np.float32),
+                        rb=rb, dlt=np.array([D, L, T]), names=np.array(names, dtype=object),
+                        labels=np.array(list(lab2n.keys()), dtype=object),
+                        label_nodes=np.array(list(lab2n.values()), dtype=np.int64))
+    print(f"[save_forward] regime {idx:03d} D,L,T={D},{L},{T} mean_E={mean_E:.3f} -> {out}", flush=True)
+
+
+def _single_regime_logL(root_pi, oneMinusE, iters=200):
+    """Best per-regime data logL = single-component EM on this regime (with survival)."""
+    F, S = root_pi.shape
+    log_pO = np.full(S, -math.log2(S)); prev = -np.inf
+    for _ in range(iters):
+        m = log_pO[None, :] + root_pi
+        num = _lse2(m, axis=1)
+        surv = math.log2(max((np.exp2(log_pO) * oneMinusE).sum(), 1e-300))
+        ll = float((num - surv).sum())
+        pbs = np.exp2(m - _lse2(m, axis=1, keepdims=True))
+        Of = pbs.sum(0); log_pO = np.log2(np.maximum(Of / Of.sum(), 1e-300))
+        if abs(ll - prev) < 1e-2:
+            break
+        prev = ll
+    return ll, log_pO
+
+
+def regime_mixture_em(npz_dir, iters=400):
+    files = sorted(glob.glob(f"{npz_dir}/regime_*.npz"))
+    if not files:
+        raise SystemExit(f"no regime_*.npz in {npz_dir}")
+    rps, Es, dlts = [], [], []
+    for f in files:
+        d = np.load(f, allow_pickle=True)
+        rps.append(d["root_pi"].astype(np.float32)); Es.append(d["E"].astype(np.float64))
+        dlts.append(tuple(float(x) for x in d["dlt"]))
+    rb = int(d["rb"]); names = list(d["names"])
+    lab2n = {str(k): int(v) for k, v in zip(d["labels"], d["label_nodes"])}
+    K = len(files); F, S = rps[0].shape
+    oneMinusE = [np.maximum(1.0 - np.exp2(E), 1e-300) for E in Es]
+    # single-regime baselines
+    base = [_single_regime_logL(rps[k], oneMinusE[k]) for k in range(K)]
+    best_single = max(range(K), key=lambda k: base[k][0])
+
+    log_pi = np.full(K, -math.log2(K))
+    log_pO = np.full((K, S), -math.log2(S)); prev = -np.inf; nit = iters
+    for it in range(iters):
+        Lk = np.empty((F, K), dtype=np.float64)
+        for k in range(K):
+            m = log_pO[k][None, :] + rps[k]
+            num = _lse2(m.astype(np.float64), axis=1)
+            surv = math.log2(max((np.exp2(log_pO[k]) * oneMinusE[k]).sum(), 1e-300))
+            Lk[:, k] = num - surv
+        joint = log_pi[None, :] + Lk
+        ll = float(_lse2(joint, axis=1).sum())
+        gamma = np.exp2(joint - _lse2(joint, axis=1, keepdims=True))     # [F,K]
+        Nk = gamma.sum(0); log_pi = np.log2(np.maximum(Nk / F, 1e-300))
+        for k in range(K):
+            m = (log_pO[k][None, :] + rps[k]).astype(np.float64)
+            pbs = np.exp2(m - _lse2(m, axis=1, keepdims=True))
+            Ok = (gamma[:, k:k + 1] * pbs).sum(0)
+            log_pO[k] = np.log2(np.maximum(Ok / Ok.sum(), 1e-300))
+        if abs(ll - prev) < 1e-2:
+            nit = it + 1; break
+        prev = ll
+    return dict(log_pi=log_pi, log_pO=log_pO, gamma=gamma, ll=ll, nit=nit, dlts=dlts,
+                rb=rb, names=names, lab2n=lab2n, base=base, best_single=best_single, K=K, F=F)
+
+
+def report_regime_mixture(R):
+    pi = np.exp2(R["log_pi"]); pO = np.exp2(R["log_pO"]); K = R["K"]; rb = R["rb"]
+    dlts = R["dlts"]; lab2n = R["lab2n"]; names = R["names"]
+    marg = (pi[:, None] * pO).sum(0)
+    hard = R["gamma"].argmax(1); cnt = np.bincount(hard, minlength=K)
+    best_single_ll = R["base"][R["best_single"]][0]
+    node2lab = {v: k for k, v in lab2n.items()}
+    print(f"\n================ REGIME-MIXTURE ({K} regimes) ================")
+    print(f"  mixture logL={R['ll']:.1f}   best-single logL={best_single_ll:.1f}   "
+          f"gain={R['ll']-best_single_ll:.1f}  (best single regime DLT={dlts[R['best_single']]})  iters={R['nit']}")
+    order = np.argsort(-pi)
+    print(f"  ACTIVE regimes (pi>0.01):  [D,L,T]  pi  fams(hard)  O@root  top-orig-clades")
+    for k in order:
+        if pi[k] < 0.01:
+            continue
+        top = np.argsort(-pO[k])[:5]
+        desc = ", ".join(f"{node2lab.get(int(s), names[int(s)][:10])}={pO[k][int(s)]:.3f}" for s in top)
+        print(f"    D,L,T={str(tuple(round(x,3) for x in dlts[k])):22s} pi={pi[k]:.3f} "
+              f"n={int(cnt[k]):5d} O@root={pO[k][rb]:.3f}  [{desc}]")
+    print(f"  -- MARGINAL p^O (Σ_k pi_k p^O_k); single-regime collapses O@root high --")
+    print(f"     root  marg={marg[rb]:.4f}")
+    for lab in ("DPANN", "Undinarchaeota", "Nanoarchaeota", "Asgard", "TackA", "Eury", "Cluster1"):
+        s = lab2n.get(lab)
+        if s is not None:
+            print(f"     {lab:16s} marg={marg[s]:.4f}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dlt", default="0.048,0.287,0.248", help="global D,L,T (AleRax-global default)")
@@ -154,17 +266,35 @@ def main():
                     help="K>1: fit a K-component MIXTURE over families for origination "
                          "(breaks the single-shared-p^O pooling that collapses to the root).")
     ap.add_argument("--mix-seed", type=int, default=0)
+    ap.add_argument("--save-forward-idx", type=int, default=-1,
+                    help="regime-mixture scan: compute+save forward for MIX_GRID[idx] (one GPU job).")
+    ap.add_argument("--out-dir", default=None, help="dir for regime npz / mixture outputs.")
+    ap.add_argument("--mixture-npz", default=None,
+                    help="run the regime-mixture EM over regime_*.npz in this dir (CPU/numpy).")
     args = ap.parse_args()
+
+    # CPU-only path: regime-mixture EM over precomputed forwards (no CUDA needed).
+    if args.mixture_npz:
+        R = regime_mixture_em(args.mixture_npz, iters=args.em_iters * 2)
+        report_regime_mixture(R)
+        return 0
+
     if not torch.cuda.is_available():
         raise SystemExit("CUDA required.")
     dev = torch.device("cuda"); dtype = torch.float64
     D, L, T = (float(x) for x in args.dlt.split(","))
     roots = args.roots.split(",") if args.roots else ROOTS
 
+    # GPU path: save one regime's forward for the mixture scan.
+    if args.save_forward_idx >= 0:
+        r = roots[0]
+        save_forward(r, args.save_forward_idx, args.fm_mode, args.out_dir, dev, dtype)
+        return 0
+
     if args.mixture_k > 1:
         K = args.mixture_k
         for r in roots:
-            root_pi, S, rb, mean_E, names, lab2n = root_pi_and_E(r, D, L, T, args.fm_mode, dev, dtype)
+            root_pi, S, rb, mean_E, names, lab2n, _Ev = root_pi_and_E(r, D, L, T, args.fm_mode, dev, dtype)
             F = root_pi.shape[0]
             norm = F * math.log2(max(1e-300, 1.0 - mean_E))
             # baseline single-component
@@ -196,7 +326,7 @@ def main():
 
     out = {}
     for r in roots:
-        root_pi, S, rb, mean_E, names, lab2n = root_pi_and_E(r, D, L, T, args.fm_mode, dev, dtype)
+        root_pi, S, rb, mean_E, names, lab2n, _Ev = root_pi_and_E(r, D, L, T, args.fm_mode, dev, dtype)
         log_pO, ll, nit = em_o(root_pi, S, args.em_iters)
         data_logL = ll - root_pi.shape[0] * math.log2(max(1e-300, 1.0 - mean_E))
         pO = np.exp2(log_pO)
