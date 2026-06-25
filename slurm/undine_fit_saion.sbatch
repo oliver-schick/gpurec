@@ -18,7 +18,7 @@ set -euo pipefail
 : "${GPUREC_DIR:?must be exported}"
 : "${ROOT:=Eury}"
 : "${OUT:?must be exported}"
-: "${WARM:?must be exported}"           # warm-start theta(+omega) sidecar
+: "${WARM:=}"                           # warm-start theta(+omega) sidecar (empty = cold init)
 : "${SIGMA:=1.0}"
 : "${STEPS:=250}"
 : "${FBS:=500}"
@@ -55,13 +55,14 @@ sys.exit(0 if torch.cuda.is_available() else 2)
 PYEOF
 
 mkdir -p "$(dirname "$OUT")"
+WARM_ARG=(); [ -n "$WARM" ] && WARM_ARG=(--init-from-rates "$WARM")
 # EXTRA_ARGS is intentionally UNQUOTED (word-split into argv).
-echo "=== CMD: $PY experiments/run_undine_branchwise.py --root $ROOT --out $OUT (+common +[$EXTRA_ARGS]) ==="
+echo "=== CMD: $PY run_undine_branchwise.py --root $ROOT --out $OUT (+common +warm=[$WARM] +[$EXTRA_ARGS]) ==="
 PYTHONPATH=. "$PY" experiments/run_undine_branchwise.py \
   --root "$ROOT" --out "$OUT" \
   --fm-mode e-only --optimizer lbfgs --steps "$STEPS" \
   --family-batch-size "$FBS" \
   --prior brownian --brownian-sigma "$SIGMA" \
-  --init-from-rates "$WARM" \
+  "${WARM_ARG[@]}" \
   $EXTRA_ARGS 2>&1
 echo "=== DONE undine_fit ($(date)) -> $OUT ==="

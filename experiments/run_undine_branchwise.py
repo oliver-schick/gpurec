@@ -313,6 +313,16 @@ def _run(args, data_dir: Path):
                 print("      O class sizes:", dict(sorted(
                     collections.Counter(omega_group_index.tolist()).items())))
             raise SystemExit("--preflight-groups: grouping built OK, exiting before fit")
+    # ROOT-CLASS origination: 2 O classes {root alone, everything-else tied}. The root
+    # gets its own free origination weight (it can hog the deep-origination mass the core
+    # families want), but ALL non-root branches share ONE weight -> no branch can be
+    # individually starved below the common non-root level. Free per-branch DTL.
+    if args.origination_root_class and args.origination == "optimize" and omega_group_index is None:
+        _r = [i for i in range(S) if parent_index[i].item() < 0][0]
+        omega_group_index = torch.ones(S, dtype=torch.long, device=device)
+        omega_group_index[_r] = 0
+        print(f"      ROOT-CLASS origination: 2 classes {{root={_r}, rest}} "
+              f"(root free, all {S-1} non-root branches tied)", flush=True)
     brownian_sigma = float(args.brownian_sigma) if args.prior == "brownian" else None
     brownian_root_sigma = args.brownian_root_sigma
     prior_info = {"prior": args.prior}
@@ -662,6 +672,10 @@ def _parse_args(argv=None):
                         "inflation collapses once O can't trade against T.")
     p.add_argument("--origination-fixed-atree", default=None,
                    help="Labelled tree matching --origination-fixed-from (default: the --root tree).")
+    p.add_argument("--origination-root-class", action="store_true",
+                   help="With --origination optimize: 2 O classes {root alone, all non-root tied}. "
+                        "The root gets its own free origination weight; every other branch shares one "
+                        "weight (so none can be individually starved). Free per-branch DTL.")
     p.add_argument("--origination-floor", type=float, default=0.0,
                    help="With --origination optimize: anti-collapse uniform floor alpha in [0,1). "
                         "p^O=(1-alpha)*softmax(omega)+alpha/S, so a fraction alpha of origination mass "
