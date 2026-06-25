@@ -17,7 +17,7 @@
 set -uo pipefail
 : "${GPUREC_DIR:?}"; : "${RFXDIR:?}"; : "${OUTDIR:?}"; : "${PY_MODULE:=python/3.11.11}"
 : "${STEPS:=250}"; : "${FBS:=500}"; : "${SIGMA:=1.0}"
-ROOTS=(Eury TackA DPANN MHH HalobacThermopl Kor UndineClu2 Cluster2)
+ROOTS=(Alti AMD Asgard Cluster2 DPANN Eury HalobacThermopl Kor MHH Micra5 MicraDia TACA TackA TAC UndineClu2)
 ROOT="${ROOTS[$SLURM_ARRAY_TASK_ID]}"
 cd "$GPUREC_DIR"
 export TORCH_EXTENSIONS_DIR="$GPUREC_DIR/.torch_ext"
