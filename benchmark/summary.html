@@ -1,0 +1,178 @@
+<title>gpurec vs AleRax — Williams 2017 benchmark</title>
+<style>
+  :root{
+    --ground:#0D131F; --panel:#141C2B; --panel-2:#101725;
+    --text:#E7EDF6; --muted:#8FA0BC; --line:#26324A;
+    --gpurec:#36D7C4; --alerax:#E0A24A;
+    --mono:ui-monospace,"SF Mono","Cascadia Code","JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--ground);color:var(--text);font-family:var(--sans);
+    line-height:1.55;-webkit-font-smoothing:antialiased;
+    background-image:radial-gradient(1200px 600px at 80% -10%, #16243a 0%, rgba(22,36,58,0) 60%);}
+  .wrap{max-width:920px;margin:0 auto;padding:clamp(20px,5vw,64px) clamp(18px,5vw,40px) 80px;}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.18em;text-transform:uppercase;
+    color:var(--muted);display:flex;flex-wrap:wrap;gap:.5em 1.1em;margin:0 0 22px;}
+  .eyebrow b{color:var(--gpurec);font-weight:600}
+  h1{font-size:clamp(34px,7vw,62px);line-height:1.02;margin:0 0 14px;font-weight:680;letter-spacing:-.02em;}
+  h1 .vs{color:var(--muted);font-weight:400;font-family:var(--mono);font-size:.5em;vertical-align:.18em;margin:0 .12em;}
+  h1 .a{color:var(--gpurec)} h1 .b{color:var(--alerax)}
+  .lede{font-size:clamp(16px,2.3vw,19px);color:#C3CEE0;max-width:60ch;margin:0 0 40px;}
+  .lede b{color:var(--text);font-weight:600}
+
+  /* hero race */
+  .race{background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line);
+    border-radius:16px;padding:clamp(20px,3.5vw,34px);margin:0 0 14px;}
+  .race-head{display:flex;justify-content:space-between;align-items:baseline;gap:16px;margin-bottom:22px;flex-wrap:wrap}
+  .race-head .ctx{font-family:var(--mono);font-size:12.5px;color:var(--muted);letter-spacing:.04em}
+  .race-head .big{font-family:var(--mono);font-weight:680;letter-spacing:-.03em;
+    font-size:clamp(40px,9vw,76px);line-height:.9;color:var(--gpurec);}
+  .race-head .big small{display:block;font-size:13px;font-weight:500;letter-spacing:.12em;
+    text-transform:uppercase;color:var(--muted);margin-top:10px}
+  .bar{margin:18px 0}
+  .bar .tag{display:flex;justify-content:space-between;font-family:var(--mono);font-size:13.5px;margin-bottom:7px}
+  .bar .tag .who{font-weight:600} .bar .tag .t{color:var(--muted)}
+  .track{height:30px;background:#0B1018;border:1px solid var(--line);border-radius:7px;overflow:hidden}
+  .fill{height:100%;border-radius:6px 0 0 6px;transform-origin:left center;transform:scaleX(var(--w));
+    animation:grow .9s cubic-bezier(.2,.8,.2,1) both;}
+  .fill.g{background:linear-gradient(90deg,#2aa899,var(--gpurec))}
+  .fill.a{background:linear-gradient(90deg,#a8762f,var(--alerax));animation-delay:.12s}
+  @keyframes grow{from{transform:scaleX(0)}to{transform:scaleX(var(--w))}}
+  .race-foot{font-size:13px;color:var(--muted);margin-top:18px}
+
+  /* correctness strip */
+  .ok{display:flex;align-items:center;gap:18px;background:var(--panel);border:1px solid var(--line);
+    border-left:3px solid var(--gpurec);border-radius:12px;padding:18px 22px;margin:0 0 44px}
+  .ok .r{font-family:var(--mono);font-size:clamp(26px,5vw,34px);font-weight:680;color:var(--gpurec);letter-spacing:-.02em}
+  .ok .txt{font-size:14.5px;color:#C3CEE0}
+  .ok .txt b{color:var(--text)}
+
+  h2{font-family:var(--mono);font-size:13px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);
+    font-weight:600;margin:0 0 18px;padding-bottom:10px;border-bottom:1px solid var(--line)}
+  section{margin:0 0 44px}
+
+  /* table */
+  .tbl{width:100%;border-collapse:collapse;font-size:14px}
+  .tbl th,.tbl td{text-align:right;padding:11px 12px;border-bottom:1px solid var(--line)}
+  .tbl th:first-child,.tbl td:first-child{text-align:left}
+  .tbl thead th{font-family:var(--mono);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:500}
+  .tbl td{font-family:var(--mono)}
+  .tbl td.lab{font-family:var(--sans)}
+  .tbl .tool{display:inline-flex;align-items:center;gap:8px;font-weight:600}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block}
+  .dot.g{background:var(--gpurec)} .dot.a{background:var(--alerax)}
+  .win{color:var(--gpurec)}
+  .tbl tr.spec td{color:var(--muted)}
+  .note{font-size:12.5px;color:var(--muted);margin-top:12px}
+
+  /* fairness chips */
+  .chips{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}
+  .chip{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .chip h3{margin:0 0 4px;font-size:13.5px;font-weight:600;color:var(--text)}
+  .chip p{margin:0;font-size:13px;color:var(--muted)}
+  .chip code{font-family:var(--mono);font-size:12px;color:var(--gpurec);background:#0b1018;padding:1px 5px;border-radius:4px}
+
+  /* setup footer */
+  .setup{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:22px;
+    border-top:1px solid var(--line);padding-top:26px;margin-top:8px}
+  .setup dt{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:5px}
+  .setup dd{margin:0;font-size:13.5px;color:#C3CEE0}
+  .setup dd b{color:var(--text)}
+  .foot{margin-top:40px;font-size:12px;color:var(--muted);font-family:var(--mono)}
+  a{color:var(--gpurec)}
+  @media (prefers-reduced-motion:reduce){.fill{animation:none}}
+</style>
+
+<div class="wrap">
+  <p class="eyebrow"><span>OIST · Szöllősi&nbsp;Unit</span><span>Williams&nbsp;2017 · archaeal&nbsp;DTL</span><span><b>2026-06-25</b></span></p>
+
+  <h1><span class="a">gpurec</span><span class="vs">vs</span><span class="b">AleRax</span></h1>
+  <p class="lede">A GPU reimplementation of AleRax's undated duplication–transfer–loss reconciliation likelihood, benchmarked head-to-head on the Williams 2017 archaeal gene families. <b>Same model, same families, same fixed species tree</b> — only the engine differs.</p>
+
+  <div class="race">
+    <div class="race-head">
+      <div class="ctx">FULL DATASET · GLOBAL RATES<br>3,946 families · DPANN root · wall-clock</div>
+      <div class="big">4.1×<small>gpurec faster</small></div>
+    </div>
+    <div class="bar">
+      <div class="tag"><span class="who" style="color:var(--gpurec)">gpurec · 1× A100</span><span class="t">489 s &nbsp;(8m 09s)</span></div>
+      <div class="track"><div class="fill g" style="--w:.245"></div></div>
+    </div>
+    <div class="bar">
+      <div class="tag"><span class="who" style="color:var(--alerax)">AleRax · 64 CPU ranks</span><span class="t">1,999 s &nbsp;(33m 19s)</span></div>
+      <div class="track"><div class="fill a" style="--w:1"></div></div>
+    </div>
+    <p class="race-foot">Both tools estimate one shared set of D/T/L rates over the full family set, on the same fixed DPANN-rooted species tree.</p>
+  </div>
+
+  <div class="ok">
+    <span class="r">r = 0.999997</span>
+    <span class="txt"><b>And it's the same likelihood.</b> Per-family log-likelihood of gpurec evaluated at AleRax's own fitted rates, correlated against AleRax across all 5,446 families. The tiny constant offset is a CCP-normalization convention, independent of the rates.</span>
+  </div>
+
+  <section>
+    <h2>Every run</h2>
+    <table class="tbl">
+      <thead>
+        <tr><th>Run</th><th>Tool</th><th>Families</th><th>Wall</th><th>ms / family</th><th>Speed-up</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="lab">Global · full</td>
+          <td><span class="tool"><span class="dot g"></span>gpurec</span></td>
+          <td>3,946</td><td>489 s</td><td>124</td><td rowspan="2" class="win" style="vertical-align:middle">4.1×</td>
+        </tr>
+        <tr>
+          <td class="lab">Global · full</td>
+          <td><span class="tool"><span class="dot a"></span>AleRax</span></td>
+          <td>3,946</td><td>1,999 s</td><td>507</td>
+        </tr>
+        <tr>
+          <td class="lab">Global · pilot</td>
+          <td><span class="tool"><span class="dot g"></span>gpurec</span></td>
+          <td>177</td><td>34 s</td><td>192</td><td rowspan="2" class="win" style="vertical-align:middle">2.5×</td>
+        </tr>
+        <tr>
+          <td class="lab">Global · pilot</td>
+          <td><span class="tool"><span class="dot a"></span>AleRax</span></td>
+          <td>177</td><td>84 s</td><td>420</td>
+        </tr>
+        <tr class="spec">
+          <td class="lab">Per-species · pilot</td>
+          <td><span class="tool"><span class="dot g"></span>gpurec</span></td>
+          <td>177</td><td>210 s</td><td>1,186</td><td rowspan="2" class="win" style="vertical-align:middle">≫</td>
+        </tr>
+        <tr class="spec">
+          <td class="lab">Per-species · pilot</td>
+          <td><span class="tool"><span class="dot a"></span>AleRax</span></td>
+          <td>177</td><td>&gt; 1 h</td><td>—</td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="note">The speed-up grows with scale (2.5× → 4.1×) as gpurec amortizes its fixed GPU/setup cost. Global is AleRax's <em>most</em> competitive model: on per-species (per-branch) rates AleRax exceeded an hour on just 177 families and was stopped, while gpurec finished in 210 s.</p>
+  </section>
+
+  <section>
+    <h2>What made it a fair fight</h2>
+    <div class="chips">
+      <div class="chip"><h3>Identical families</h3><p>Both ran the same 3,946 families (5,446 minus those with &lt;4 species — the filter both tools apply).</p></div>
+      <div class="chip"><h3>Same model</h3><p><code>UndatedDTL</code>, global rates, uniform origination, fixed DPANN tree (<code>species-tree-search SKIP</code>).</p></div>
+      <div class="chip"><h3>Same missing-data term</h3><p>gpurec <code>fm-mode e-only</code> ↔ AleRax <code>--fraction-missing-file</code>, both filtered to the 60 tree species.</p></div>
+      <div class="chip"><h3>Same optimizer family</h3><p>L-BFGS on both sides, run to each tool's own convergence.</p></div>
+      <div class="chip"><h3>Pinned hardware</h3><p>gpurec on one A100-80GB (driver-verified); never the mixed/older GPU partition.</p></div>
+      <div class="chip"><h3>Identical CCP inputs</h3><p>Both consume the same ALE conditional-clade files — no re-derivation between tools.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Setup</h2>
+    <dl class="setup">
+      <div><dt>Dataset</dt><dd><b>Williams et al. 2017</b> archaeal reconciliation — 5,446 ALE CCP gene families, 60-taxon DPANN-rooted species tree. <span style="color:var(--muted)">(Zenodo 17360806)</span></dd></div>
+      <div><dt>gpurec</dt><dd><b>Saion</b> · 1× NVIDIA A100-80GB · PyTorch 2.6 + Triton · float64</dd></div>
+      <div><dt>AleRax</dt><dd><b>Deigo</b> · v1.4.1 · 64 MPI ranks across 8 EPYC nodes</dd></div>
+      <div><dt>Measurement</dt><dd>Wall-clock via <b>ruse</b> + each tool's own timer; correctness via per-family log-likelihood at matched rates</dd></div>
+    </dl>
+    <p class="foot">gpurec ≡ AleRax likelihood · ~4× faster at scale · reproducible via the benchmark pipeline in the gpurec repo</p>
+  </section>
+</div>
