@@ -1,19 +1,20 @@
-"""Paper-vs-FULLbasin per-branch event comparison.
+"""Paper-vs-FULLbasin per-branch event comparison + genome-flow / lineage view.
 
 Joins the .perspecies_events.tsv files written by per_node_copies.py (one per rate
-set) on the species node and tabulates per-branch O/D/T/L, highlighting where the
-FULLbasin free-per-branch fit inflates transfer relative to the paper's rates
-(the DPANN-T pathology). Triton-free; runs anywhere.
+set) on the species node. Transfer is a DONOR rate: `transfer` is counted at the
+donor (genes leaving), `transfer_in` at the recipient (genes arriving). A branch's
+genome (copies) is fed by origination + transfer_in + duplication + INHERITANCE from
+its parent -- NOT by its own `transfer` (which is outflow). Triton-free.
 
   python experiments/compare_events.py \
      --label paper_br2=pnc_paper_DTL_br2.perspecies_events.tsv \
-     --label paper_br1O=pnc_paper_DTL_br1_O.perspecies_events.tsv \
      --label fullbasin=pnc_FULLbasin.perspecies_events.tsv \
-     [--fixedO pnc_fixedO.perspecies_events.tsv]
+     [--lineage DPANN]     # trace a clade's flow up to the root
 """
 from __future__ import annotations
 import argparse
-from pathlib import Path
+
+FIELDS = ("spec", "dup", "loss", "transfer", "transfer_in", "orig", "presence", "copies")
 
 
 def _load(path):
@@ -23,12 +24,11 @@ def _load(path):
         ci = {c: i for i, c in enumerate(hdr)}
         for line in fh:
             p = line.rstrip("\n").split("\t")
-            node = int(p[ci["node"]])
-            rows[node] = {"name": p[ci["name"]], "label": p[ci["label"]],
-                          "spec": float(p[ci["spec"]]), "dup": float(p[ci["dup"]]),
-                          "loss": float(p[ci["loss"]]), "transfer": float(p[ci["transfer"]]),
-                          "orig": float(p[ci["orig"]]), "presence": float(p[ci["presence"]]),
-                          "copies": float(p[ci["copies"]])}
+            d = {"name": p[ci["name"]], "label": p[ci["label"]],
+                 "parent": int(p[ci["parent"]]) if "parent" in ci else -1}
+            for f in FIELDS:
+                d[f] = float(p[ci[f]]) if f in ci else 0.0
+            rows[int(p[ci["node"]])] = d
     return rows
 
 
@@ -36,7 +36,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--label", action="append", default=[],
                     help="name=path.perspecies_events.tsv (repeatable; first is the reference)")
-    ap.add_argument("--top", type=int, default=25, help="rows for the T-inflation table")
+    ap.add_argument("--lineage", default=None, help="trace this clade label's flow up to the root")
+    ap.add_argument("--top", type=int, default=14)
     args = ap.parse_args()
     if len(args.label) < 2:
         raise SystemExit("need >=2 --label name=path")
@@ -51,41 +52,54 @@ def main():
         return data[nm].get(node, {}).get(field, float("nan"))
 
     # 1. totals
-    print("==== per-model event totals (summed over branches, E[events]·n_families) ====")
-    print(f"{'model':>14s} {'orig':>10s} {'dup':>10s} {'transfer':>12s} {'loss':>12s} {'spec':>12s} {'copies':>12s}")
+    print("==== per-model event totals (E[events]*n_families, summed over branches) ====")
+    print(f"{'model':>12s} {'orig':>9s} {'dup':>9s} {'T_out':>10s} {'T_in':>10s} {'loss':>10s} {'copies':>11s}")
     for nm in names:
-        tot = {f: sum(r[f] for r in data[nm].values()) for f in
-               ("orig", "dup", "transfer", "loss", "spec", "copies")}
-        print(f"{nm:>14s} {tot['orig']:>10.1f} {tot['dup']:>10.1f} {tot['transfer']:>12.1f} "
-              f"{tot['loss']:>12.1f} {tot['spec']:>12.1f} {tot['copies']:>12.1f}")
+        t = {f: sum(r[f] for r in data[nm].values()) for f in
+             ("orig", "dup", "transfer", "transfer_in", "loss", "copies")}
+        print(f"{nm:>12s} {t['orig']:>9.0f} {t['dup']:>9.0f} {t['transfer']:>10.0f} "
+              f"{t['transfer_in']:>10.0f} {t['loss']:>10.0f} {t['copies']:>11.0f}")
 
-    # 2. labeled-clade rows (transfer + orig + copies across models)
-    other = [n for n in names if n != ref]
-    print(f"\n==== labeled-clade branches: transfer / orig / copies across models ====")
-    hdr = f"{'name':>22s} {'label':>12s}"
+    # 2. genome arrival/departure budget for the labeled clades.
+    #    arrivals = orig + transfer_in + dup (+ inherited, the remainder vs copies);
+    #    departures from the present genome = transfer(out) + loss.
+    print(f"\n==== genome flow at labeled clades (per model: orig | T_in | T_out | loss | copies) ====")
+    hdr = f"{'clade':>16s}"
     for nm in names:
-        hdr += f" | {nm[:10]:>10s} T  O   cop"
+        hdr += f" |{nm[:9]:>9s}: O   Tin  Tout  L   cop"
     print(hdr)
     for node in nodes:
         lab = col(ref, node, "label")
         if not lab:
             continue
-        line = f"{col(ref,node,'name')[:22]:>22s} {lab[:12]:>12s}"
+        line = f"{lab[:16]:>16s}"
         for nm in names:
-            line += f" | {col(nm,node,'transfer'):>5.2f} {col(nm,node,'orig'):>4.2f} {col(nm,node,'copies'):>5.0f}"
+            line += (f" | {col(nm,node,'orig'):>4.0f} {col(nm,node,'transfer_in'):>4.0f} "
+                     f"{col(nm,node,'transfer'):>4.0f} {col(nm,node,'loss'):>4.0f} {col(nm,node,'copies'):>5.0f}")
         print(line)
 
-    # 3. biggest transfer inflation vs the reference (last model - ref)
-    last = names[-1]
-    print(f"\n==== top {args.top} branches by transfer inflation ({last} - {ref}) ====")
-    print(f"{'name':>22s} {'label':>12s} {'T_'+ref[:8]:>12s} {'T_'+last[:8]:>12s} {'dT':>8s} "
-          f"{'O_'+ref[:6]:>9s} {'O_'+last[:6]:>9s} {'cop_'+last[:6]:>9s}")
-    deltas = sorted(nodes, key=lambda n: col(last, n, "transfer") - col(ref, n, "transfer"), reverse=True)
-    for node in deltas[:args.top]:
-        dT = col(last, node, "transfer") - col(ref, node, "transfer")
-        print(f"{col(ref,node,'name')[:22]:>22s} {col(ref,node,'label')[:12]:>12s} "
-              f"{col(ref,node,'transfer'):>12.3f} {col(last,node,'transfer'):>12.3f} {dT:>8.3f} "
-              f"{col(ref,node,'orig'):>9.3f} {col(last,node,'orig'):>9.3f} {col(last,node,'copies'):>9.1f}")
+    # 3. lineage trace: walk from the named clade up to the root, showing the flow
+    #    so you can SEE whether a deep clade's genome is fed by inheritance from the
+    #    backbone (deep origination descending) vs by transfer_in.
+    if args.lineage:
+        tgt = [n for n in nodes if col(ref, n, "label") == args.lineage]
+        if not tgt:
+            print(f"\n[lineage] no branch labelled {args.lineage!r}")
+        else:
+            node = tgt[0]
+            print(f"\n==== lineage {args.lineage} -> root (orig / T_in / T_out / loss / copies per model) ====")
+            chain, seen = [], set()
+            while node >= 0 and node not in seen:
+                seen.add(node); chain.append(node)
+                par = col(ref, node, "parent")
+                node = int(par) if par == par else -1
+            for n in chain:
+                lab = col(ref, n, "label") or col(ref, n, "name")[:16]
+                line = f"  {lab[:18]:>18s}"
+                for nm in names:
+                    line += (f" | {col(nm,n,'orig'):>5.0f} {col(nm,n,'transfer_in'):>5.0f} "
+                             f"{col(nm,n,'transfer'):>5.0f} {col(nm,n,'loss'):>5.0f} {col(nm,n,'copies'):>6.0f}")
+                print(line)
 
 
 if __name__ == "__main__":

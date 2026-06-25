@@ -87,7 +87,7 @@ inline int sample_origination(const Fam &f, Rng &rng) {
 }
 
 // per-thread accumulators (each [S]); orig[] is filled in the sample loop at e0.
-struct Acc { double *pres, *cop, *dup, *trn, *los, *spc; };
+struct Acc { double *pres, *cop, *dup, *trn, *los, *spc, *trnin; };  // trnin = transfers RECEIVED (recipient)
 
 // recursive backtrace; `scratch` is reused (saved/restored around recursion).
 void backtrace(const Fam &f, int cid, int s, Rng &rng, std::vector<Act> &scratch,
@@ -149,13 +149,16 @@ void backtrace(const Fam &f, int cid, int s, Rng &rng, std::vector<Act> &scratch
       case K_TR: {   acc.trn[s] += 1.0;
                      backtrace(f, a.L, s, rng, scratch, stamp, sample_id, acc);
                      int rr = sample_recipient(f, s, a.R, rng);
+                     acc.trnin[rr] += 1.0;                            // transfer RECEIVED at rr
                      backtrace(f, a.R, rr, rng, scratch, stamp, sample_id, acc); return; }
       case K_TL: {   acc.trn[s] += 1.0;
                      backtrace(f, a.R, s, rng, scratch, stamp, sample_id, acc);
                      int rr = sample_recipient(f, s, a.L, rng);
+                     acc.trnin[rr] += 1.0;                            // transfer RECEIVED at rr
                      backtrace(f, a.L, rr, rng, scratch, stamp, sample_id, acc); return; }
       case K_TLMOVE:{acc.trn[s] += 1.0; acc.los[s] += 1.0;            // source lost at s
                      int rr = sample_recipient(f, s, cid, rng);
+                     acc.trnin[rr] += 1.0;                            // transfer RECEIVED at rr
                      backtrace(f, cid, rr, rng, scratch, stamp, sample_id, acc); return; }
       default: return;
     }
@@ -194,10 +197,11 @@ std::vector<torch::Tensor> sample_accumulate(
   }
 
   auto mk = [&]() { return torch::zeros({S}, torch::kFloat64); };
-  auto presence = mk(), copies = mk(), orig = mk(), dup = mk(), trn = mk(), los = mk(), spc = mk();
+  auto presence = mk(), copies = mk(), orig = mk(), dup = mk(), trn = mk(), los = mk(), spc = mk(), trnin = mk();
   double *pres_g = presence.data_ptr<double>(), *cop_g = copies.data_ptr<double>(),
          *org_g = orig.data_ptr<double>(), *dup_g = dup.data_ptr<double>(),
-         *trn_g = trn.data_ptr<double>(), *los_g = los.data_ptr<double>(), *spc_g = spc.data_ptr<double>();
+         *trn_g = trn.data_ptr<double>(), *los_g = los.data_ptr<double>(), *spc_g = spc.data_ptr<double>(),
+         *trnin_g = trnin.data_ptr<double>();
 
 #ifdef _OPENMP
   if (n_threads > 0) omp_set_num_threads((int)n_threads);
@@ -209,11 +213,11 @@ std::vector<torch::Tensor> sample_accumulate(
     tid = omp_get_thread_num();
 #endif
     std::vector<double> pres_t(S, 0.0), cop_t(S, 0.0), org_t(S, 0.0), dup_t(S, 0.0),
-                        trn_t(S, 0.0), los_t(S, 0.0), spc_t(S, 0.0);
+                        trn_t(S, 0.0), los_t(S, 0.0), spc_t(S, 0.0), trnin_t(S, 0.0);
     std::vector<int64_t> stamp(S, 0);
     std::vector<Act> scratch; scratch.reserve(256);
     Rng rng; rng.seed((uint64_t)seed * 2654435761ULL + (uint64_t)tid + 1);
-    Acc acc{pres_t.data(), cop_t.data(), dup_t.data(), trn_t.data(), los_t.data(), spc_t.data()};
+    Acc acc{pres_t.data(), cop_t.data(), dup_t.data(), trn_t.data(), los_t.data(), spc_t.data(), trnin_t.data()};
 #pragma omp for schedule(static)
     for (int64_t smp = 0; smp < n_samples; smp++) {
       int64_t sid = smp + 1;
@@ -226,10 +230,11 @@ std::vector<torch::Tensor> sample_accumulate(
       for (int s = 0; s < (int)S; s++) {
         pres_g[s] += pres_t[s]; cop_g[s] += cop_t[s]; org_g[s] += org_t[s];
         dup_g[s] += dup_t[s]; trn_g[s] += trn_t[s]; los_g[s] += los_t[s]; spc_g[s] += spc_t[s];
+        trnin_g[s] += trnin_t[s];
       }
     }
   }
-  return {presence, copies, orig, dup, trn, los, spc};   // [S] each: presence, copies, O, D, T, L, S
+  return {presence, copies, orig, dup, trn, los, spc, trnin};  // presence,copies,O,D,T_out,L,S,T_in
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {

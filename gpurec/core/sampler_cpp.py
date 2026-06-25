@@ -49,9 +49,11 @@ def _csr_splits(splits_of, C):
 def sample_accumulate_cpp(fwd, n_samples: int, seed: int = 0,
                           n_threads: int = 0):
     """Return per-species accumulators (SUMS over n_samples; divide by n_samples for E[·]):
-    a dict with presence, copies, orig, dup, transfer, loss, spec -- each [S].
+    a dict with presence, copies, orig, dup, transfer, loss, spec, transfer_in -- each [S].
     presence = #samples occupying s; copies = #{S,SL,leaf}; orig/dup/transfer/loss/spec
-    are per-branch event counts (O, D, T, L, S) matching AleRax's perspecies tally."""
+    are per-branch event counts (O, D, T_out, L, S); transfer (=T_out) is counted at the
+    DONOR, transfer_in at the RECIPIENT -- so a branch's genome arrivals are orig + inherited
+    + transfer_in (+dup), and its T_out are donations OUT (do not add to its own genome)."""
     C = int(fwd.Pi.shape[0]); S = int(fwd.S)
     sptr, sL, sR, slp = _csr_splits(fwd.splits_of, C)
     leafsp = np.full(C, -1, dtype=np.int64)
@@ -65,5 +67,5 @@ def sample_accumulate_cpp(fwd, n_samples: int, seed: int = 0,
         t(sptr, i64), t(sL, i64), t(sR, i64), t(slp, f64),
         t(leafsp, i64), t(fwd.sp_child1, i64), t(fwd.sp_child2, i64),
         int(fwd.root_clade_id), C, S, int(n_samples), int(seed), int(n_threads))
-    keys = ("presence", "copies", "orig", "dup", "transfer", "loss", "spec")
+    keys = ("presence", "copies", "orig", "dup", "transfer", "loss", "spec", "transfer_in")
     return {k: r.numpy() for k, r in zip(keys, res)}

@@ -168,7 +168,7 @@ def main():
     presence = np.zeros((F, S)); copies = np.zeros((F, S)); orig_root = np.zeros(F)
     copies_all = np.zeros((F, S))                     # diagnostic: OLD all-event count
     obs_genes = np.zeros(S); obs_fam = np.zeros(S)    # observed leaf gene/family counts (ground truth)
-    ev_acc = {k: np.zeros(S) for k in ("orig", "dup", "transfer", "loss", "spec")}  # per-branch events (cpp)
+    ev_acc = {k: np.zeros(S) for k in ("orig", "dup", "transfer", "loss", "spec", "transfer_in")}  # per-branch events (cpp)
     pp_root_an_sum = 0.0
     rng = np.random.default_rng(args.seed)
     ALL_EV = {"O", "D", "S", "T", "SL", "TL", "leaf"}
@@ -219,7 +219,7 @@ def main():
                 rc_ = sample_accumulate_cpp(fwd, args.n_samples, seed=args.seed + f,
                                             n_threads=args.threads)
                 presence[f] = rc_["presence"]; copies[f] = rc_["copies"]
-                for _k in ("orig", "dup", "transfer", "loss", "spec"):
+                for _k in ("orig", "dup", "transfer", "loss", "spec", "transfer_in"):
                     ev_acc[_k] += rc_[_k]
                 if f < args.validate_n:        # cross-check the compiled engine vs pure Python
                     pp = np.zeros(S); cp = np.zeros(S)
@@ -305,7 +305,8 @@ def main():
                                   # per-branch event counts (expected, Σ over families) -- AleRax tally
                                   orig=float(ev_acc["orig"][s] / args.n_samples),
                                   dup=float(ev_acc["dup"][s] / args.n_samples),
-                                  transfer=float(ev_acc["transfer"][s] / args.n_samples),
+                                  transfer=float(ev_acc["transfer"][s] / args.n_samples),       # T_out (donor)
+                                  transfer_in=float(ev_acc["transfer_in"][s] / args.n_samples), # T_in (recipient)
                                   loss=float(ev_acc["loss"][s] / args.n_samples),
                                   spec=float(ev_acc["spec"][s] / args.n_samples))
     Path(args.out + ".per_clade.json").write_text(json.dumps(per_clade, indent=2))
@@ -313,12 +314,13 @@ def main():
     # ev_acc holds SUMS over (families x samples); /n_samples = E[events] summed over families.
     ns = float(args.n_samples)
     with open(args.out + ".perspecies_events.tsv", "w") as fh:
-        fh.write("node\tname\tlabel\tspec\tdup\tloss\ttransfer\torig\tpresence\tcopies\n")
+        fh.write("node\tparent\tname\tlabel\tspec\tdup\tloss\ttransfer\ttransfer_in\torig\tpresence\tcopies\n")
         for s in range(S):
             lab = labeled.get(leafsets[s]) or ("root" if s == root_branch else "")
-            fh.write(f"{s}\t{names[s]}\t{lab}\t"
+            fh.write(f"{s}\t{par[s]}\t{names[s]}\t{lab}\t"
                      f"{ev_acc['spec'][s]/ns:.3f}\t{ev_acc['dup'][s]/ns:.3f}\t"
                      f"{ev_acc['loss'][s]/ns:.3f}\t{ev_acc['transfer'][s]/ns:.3f}\t"
+                     f"{ev_acc['transfer_in'][s]/ns:.3f}\t"
                      f"{ev_acc['orig'][s]/ns:.3f}\t{presence[:,s].sum():.3f}\t{copies[:,s].sum():.3f}\n")
     np.savez_compressed(args.out + ".npz", presence=presence, copies=copies,
                         names=np.array(names, dtype=object), root_branch=root_branch)
