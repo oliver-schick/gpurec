@@ -348,7 +348,24 @@ def _run(args, data_dir: Path):
     omega_init = None
     origination_l2 = 0.0
     origination_info = {"origination": args.origination}
-    if args.origination == "fixed":
+    if args.origination == "fixed" and args.origination_fixed_po_npz:
+        # STAGE B input: HOLD origination at the random-effects shared p^O (a per-gpurec-node
+        # vector, e.g. rfx_<root>.npz log_pO with 511=0 / root 0.22) while D/L/T optimize
+        # branchwise. Direct npz -> no AleRax label round-trip.
+        import numpy as _np
+        _d = _np.load(args.origination_fixed_po_npz, allow_pickle=True)
+        _lpo = torch.tensor(_d["log_pO"], dtype=dtype, device=device)         # already log2
+        if int(_lpo.shape[0]) != S:
+            raise SystemExit(f"--origination-fixed-po-npz log_pO len {int(_lpo.shape[0])} != S={S}")
+        omega_init = _lpo
+        _pO_fx = torch.exp2(_lpo); _pO_fx = _pO_fx / _pO_fx.sum()
+        origination_info.update({"origination": "fixed",
+                                 "fixed_from": str(args.origination_fixed_po_npz),
+                                 "pO_min": float(_pO_fx.min()), "pO_max": float(_pO_fx.max())})
+        print(f"      FIXED origination from npz {Path(args.origination_fixed_po_npz).name}: "
+              f"p^O in [{float(_pO_fx.min()):.2e}, {float(_pO_fx.max()):.3f}] (HELD while D/L/T optimize)",
+              flush=True)
+    elif args.origination == "fixed":
         # HOLD origination at the paper's structured per-branch O while only D/L/T
         # optimize. Read p^O from an AleRax model_parameters.txt (e.g. DTL_br1_O Eury,
         # which gives DPANN a real origination); omega_init = log2(p^O) -> the optimizer
@@ -665,6 +682,10 @@ def _parse_args(argv=None):
     p.add_argument("--fm-mode", default="off", choices=["both", "e-only", "off"])
     p.add_argument("--no-fraction-missing", action="store_true")
     p.add_argument("--origination", default="uniform", choices=["uniform", "optimize", "fixed"])
+    p.add_argument("--origination-fixed-po-npz", default=None,
+                   help="With --origination fixed: hold p^O at log_pO from this npz (e.g. "
+                        "rfx_<root>.npz from the random-effects fit) -- Stage B input. "
+                        "Takes precedence over --origination-fixed-from.")
     p.add_argument("--origination-fixed-from", default=None,
                    help="With --origination fixed: AleRax model_parameters.txt to read the "
                         "per-branch origination from (HELD FIXED while D/L/T optimize). E.g. the "
