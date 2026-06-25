@@ -392,6 +392,8 @@ def _run(args, data_dir: Path):
         origination_info.update({
             "regularization": ("l2" if origination_l2 > 0 else "free"),
             "origination_l2": origination_l2})
+        if float(args.origination_floor) > 0:
+            origination_info["origination_floor"] = float(args.origination_floor)
 
     # Vertical-evolution origination prior: per-branch DEPTH = #edges from the
     # root (root=0); penalize below-root origination via --origination-depth-lambda.
@@ -510,6 +512,7 @@ def _run(args, data_dir: Path):
         origination_dirichlet_c=args.origination_dirichlet,
         origination_vertical_pi=origination_vertical_pi,
         origination_barrier_kind=args.origination_barrier_kind,
+        origination_floor=args.origination_floor,
         group_index=group_index,
         omega_group_index=omega_group_index,
     )
@@ -659,6 +662,11 @@ def _parse_args(argv=None):
                         "inflation collapses once O can't trade against T.")
     p.add_argument("--origination-fixed-atree", default=None,
                    help="Labelled tree matching --origination-fixed-from (default: the --root tree).")
+    p.add_argument("--origination-floor", type=float, default=0.0,
+                   help="With --origination optimize: anti-collapse uniform floor alpha in [0,1). "
+                        "p^O=(1-alpha)*softmax(omega)+alpha/S, so a fraction alpha of origination mass "
+                        "stays UNIFORM and no branch can be starved to ~0 (the DPANN transfer-inflation "
+                        "cure). E.g. 0.1=10%% uniform, 0.01=1%%, 0.001=0.1%%. 0=pure softmax.")
     p.add_argument("--origination-l2", type=float, default=0.0,
                    help="L2/ridge on origination logits (lambda*sum(omega^2), "
                         "shrink p^O toward uniform). 0=free. p^O is a softmax "

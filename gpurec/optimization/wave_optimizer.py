@@ -106,6 +106,7 @@ def optimize_theta_wave(
     origination_dirichlet_c: float = 0.0,
     origination_vertical_pi: torch.Tensor | None = None,
     origination_barrier_kind: str = "meanlog",
+    origination_floor: float = 0.0,
     distributed: bool = False,
     grad_reduction: str = "sum",   # Σ over families (correct for L-BFGS + DDP). "mean"
                                    # (legacy /n_batch_accum) is WRONG for L-BFGS — it makes
@@ -303,6 +304,23 @@ def optimize_theta_wave(
                              "per-branch origination log2-weights)")
         _fixed_omega_t = omega_init.to(device=device, dtype=dtype).reshape(-1).clone()
         _fixed_log_pO = _origination_log_pO(_fixed_omega_t)   # constant softmax log-prob
+    # ORIGINATION FLOOR (anti-collapse): mix a fraction alpha of the origination
+    # mass back to UNIFORM, p^O = (1-alpha)*softmax(omega) + alpha/S, so no branch
+    # can be starved to p^O~0 (which forces transfer to substitute for origination
+    # and inflates deep-clade genomes, the FULLbasin/DPANN pathology). alpha=0 ->
+    # pure softmax (byte-identical). Only meaningful with origination='optimize'.
+    _orig_floor = float(origination_floor) if (origination == 'optimize' and origination_floor) else 0.0
+    if not (0.0 <= _orig_floor < 1.0):
+        raise ValueError(f"origination_floor must be in [0,1), got {origination_floor!r}")
+
+    def _orig_log_pO(omega):
+        """log2 p^O with the optional anti-collapse uniform floor (differentiable)."""
+        lp = _origination_log_pO(omega)                 # log2 softmax(omega)
+        if _orig_floor <= 0.0:
+            return lp
+        S_ = omega.shape[-1]
+        p = (1.0 - _orig_floor) * torch.exp2(lp) + _orig_floor / S_
+        return torch.log2(p)
     # Determine S (number of species branches) for the omega vector.
     _S_branches = int(species_helpers['S'])
 
@@ -529,7 +547,7 @@ def optimize_theta_wave(
         lambda * ln2 * p^O_e (depth_e - E_{p^O}[depth])."""
         if not _use_depth or omega_d is None or grad_omega is None:
             return nll, grad_omega
-        log_pO = _origination_log_pO(omega_d)          # omega - logsumexp2(omega)
+        log_pO = _orig_log_pO(omega_d)          # omega - logsumexp2(omega)
         p = torch.exp2(log_pO)                         # [S] p^O
         Ed = (p * _depth).sum()
         pen = _depth_lambda * float(Ed.item())
@@ -542,7 +560,7 @@ def optimize_theta_wave(
         root origination without taxing the depth-distribution of the rest."""
         if not _use_root or omega_d is None or grad_omega is None:
             return nll, grad_omega
-        log_pO = _origination_log_pO(omega_d)          # [S]
+        log_pO = _orig_log_pO(omega_d)          # [S]
         p = torch.exp2(log_pO)                         # [S] p^O
         p_root = p[_root_idx]
         pen = _root_lambda * float((1.0 - p_root).item())
@@ -573,7 +591,7 @@ def optimize_theta_wave(
         Operates on the EXPANDED per-branch omega [S]; the caller reduces to groups."""
         if not _use_dirichlet or omega_d is None or grad_omega is None:
             return nll, grad_omega
-        log_pO = _origination_log_pO(omega_d)          # [S], log2 p^O
+        log_pO = _orig_log_pO(omega_d)          # [S], log2 p^O
         p = torch.exp2(log_pO)                         # [S]
         if _barrier_kind == "meanlog":
             pen = -_dir_c * float((_dir_pi * log_pO).sum().item())
@@ -727,7 +745,7 @@ def optimize_theta_wave(
         if _fixed_origination:
             log_pO = _fixed_log_pO
         else:
-            log_pO = _origination_log_pO(omega_d) if omega_d is not None else None
+            log_pO = _orig_log_pO(omega_d) if omega_d is not None else None
         if wave_layout_batches is not None:
             if selected_batch_ids is None:
                 layout_batches = wave_layout_batches
@@ -899,7 +917,8 @@ def optimize_theta_wave(
                 log_one_minus_E = _slog2(1.0 - torch.exp2(E_det))
                 with torch.enable_grad():
                     omega_leaf = omega_d.detach().clone().requires_grad_(True)
-                    log_pO_g = omega_leaf - _lse2(omega_leaf, dim=-1, keepdim=True)
+                    # match the forward's floored p^O so the omega gradient is consistent
+                    log_pO_g = _orig_log_pO(omega_leaf)
                     num = _lse2(root_pi_all + log_pO_g, dim=-1)          # [n_fam_total]
                     denom = _lse2(log_one_minus_E + log_pO_g, dim=-1)    # scalar (shared E)
                     nll_omega = -(num - denom).sum()                     # Σ_f NLL_f
@@ -1185,9 +1204,11 @@ def optimize_theta_wave(
             # omega = origination log2-weights; origination = normalised p^O_e.
             result_dict["omega"] = omega_final.detach().cpu()
             result_dict["origination"] = torch.exp2(
-                _origination_log_pO(omega_final)
+                _orig_log_pO(omega_final)
             ).detach().cpu()
             result_dict["origination_strategy"] = origination
+            if _orig_floor > 0.0:
+                result_dict["origination_floor"] = _orig_floor
             if _use_orig_l2:
                 result_dict["origination_prior"] = {
                     "type": "l2", "lambda": _orig_l2,
