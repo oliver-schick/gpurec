@@ -69,16 +69,25 @@ for SO in .torch_ext/preprocess_cpp/preprocess_cpp.so .torch_ext/recon_sampler/r
 if [ -x ".venv/bin/python" ]; then PY=".venv/bin/python"; else PY="python3.11"; fi
 mkdir -p "$OUTDIR"
 RATES="$OUTDIR/sweep_${TAG}.rates.txt"
+PNC="$OUTDIR/pnc_${TAG}"
 echo "=== [$SLURM_ARRAY_TASK_ID] $TAG : fit [$EXTRA] on $(hostname) $(date) ==="
 
-PYTHONPATH=. "$PY" experiments/run_undine_branchwise.py --root "$ROOT" --out "$RATES" \
-  --fm-mode e-only --optimizer lbfgs --steps "$STEPS" --family-batch-size "$FBS" \
-  --init-from-rates "$WARM" $EXTRA 2>&1 | tail -4 || { echo "[$TAG] FIT FAILED"; exit 1; }
+# RESUME: if this config already produced a genome sample, re-emit its SWEEPROW and skip.
+if [ -s "$PNC.perspecies_events.tsv" ]; then
+  echo "=== [$TAG] already done -> re-emit + skip ==="
+elif [ -s "$RATES.json" ]; then
+  echo "=== [$TAG] fit already done -> skip fit, sample only ==="
+else
+  PYTHONPATH=. "$PY" experiments/run_undine_branchwise.py --root "$ROOT" --out "$RATES" \
+    --fm-mode e-only --optimizer lbfgs --steps "$STEPS" --family-batch-size "$FBS" \
+    --init-from-rates "$WARM" $EXTRA 2>&1 | tail -4 || { echo "[$TAG] FIT FAILED"; exit 1; }
+fi
 
-echo "=== [$TAG] sample genomes ==="
-PNC="$OUTDIR/pnc_${TAG}"
-PYTHONPATH=. "$PY" experiments/per_node_copies.py --root "$ROOT" --sidecar "$RATES.json" \
-  --engine cpp --n-samples "$NSAMP" --out "$PNC" 2>&1 | tail -3 || { echo "[$TAG] PNC FAILED"; exit 1; }
+if [ ! -s "$PNC.perspecies_events.tsv" ]; then
+  echo "=== [$TAG] sample genomes ==="
+  PYTHONPATH=. "$PY" experiments/per_node_copies.py --root "$ROOT" --sidecar "$RATES.json" \
+    --engine cpp --n-samples "$NSAMP" --out "$PNC" 2>&1 | tail -3 || { echo "[$TAG] PNC FAILED"; exit 1; }
+fi
 
 # summary line: tag, data_logL, internal genome (copies) at root(512)/511/DPANN(510) + deep clades
 "$PY" - "$RATES.json" "$PNC.perspecies_events.tsv" "$TAG" <<'PYEOF'
