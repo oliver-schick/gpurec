@@ -63,7 +63,15 @@ if [ ! -s "$RATES.json" ]; then
     --optimizer lbfgs --steps "$STEPS" --family-batch-size "$FBS" 2>&1 | tail -6 \
     || { echo "[comp $J] FIT FAILED"; exit 1; }
 fi
-if [ ! -s "$PNC.npz" ]; then
+# per-component per-family logL (for the both-het AU / ranking)
+PERFAM="$OUTDIR/perfam_${J}.json"
+if [ ! -s "$PERFAM" ]; then
+  PYTHONPATH=. "$PY" experiments/eval_perfam_undine.py --root "$ROOT" --sidecar "$RATES.json" \
+    --ale-list "$LIST" --fm-mode e-only --out "$PERFAM" 2>&1 | tail -3 \
+    || { echo "[comp $J] EVAL FAILED"; exit 1; }
+fi
+# genome sampling (optional: GENOME=0 skips it -- the rooting runs only need per-family logL)
+if [ "${GENOME:-1}" = "1" ] && [ ! -s "$PNC.npz" ]; then
   PYTHONPATH=. "$PY" experiments/per_node_copies.py --root "$ROOT" --sidecar "$RATES.json" \
     --ale-list "$LIST" --engine cpp --n-samples "$NSAMP" --fm-mode e-only --out "$PNC" 2>&1 | tail -4 \
     || { echo "[comp $J] PNC FAILED"; exit 1; }
