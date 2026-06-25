@@ -70,6 +70,49 @@ PYTHONPATH=. python experiments/au_fullbasin.py        # branchwise AU, B=1e6
 PYTHONPATH=. python experiments/laca_compare.py        # 96 -> 772 -> 903 families at root
 ```
 
+### A.2 Basin depth — the Eury optimum is the DEEPEST; alternatives and cold starts are shallower
+
+Two independent senses in which the *other* rooting basins are shallower than Eury's.
+
+**(i) Within the FULLbasin model, every alternative root's optimum is shallower** (Table 1,
+branchwise data logL, ×10³ nats; gap from Eury):
+
+| root | branchwise logL | shallower than Eury by |
+|---|---|---|
+| **Euryarchaeota** | **−1631.5** | — (deepest) |
+| HalobacThermopl | −1635.1 | −3,600 nats |
+| TackA | −1635.5 | −4,000 |
+| MHH | −1637.7 | −6,200 |
+| DPANN | −1639.7 | −8,200 |
+| … | … | … |
+| Micra5 | −1644.1 | −12,600 |
+
+→ Eury is the ML optimum by **+3,568 nats** over the next root (FULLbasin AU = {Eury} only;
+`au_fullbasin.py`). MHH — the AleRax DTL_br2 co-equal #2 (9.7 nats behind Eury) — is **6,167 nats
+behind** under FULLbasin and AU-rejected.
+
+**(ii) The deep Eury basin is reachable only by warm-starting; cold starts fall into shallower
+basins (and root SGA/TackA, not Eury).** Three independent *uniform-init* runs converge to the
+SAME shallow basin; warm-starting at the paper's (AleRax) rates reaches the deep Eury basin:
+
+| start | basin total logL (×10³ nats) | rooting | reached |
+|---|---|---|---|
+| **warm @ AleRax rates** (AXgrp `--init-from-alerax`) | **≈ −1,642** (clade) / **−1,631.5** (FULLbasin) | **Eury #1** | the **deep** basin |
+| cold uniform-init (BTroot, BARtest, VERTtest — 3 runs) | ≈ −1,712 | Cluster2/SGA #1, **Eury last** | shallow (−70k) |
+| cold global-rate warm-up (free per-branch + free O) | ≈ −1,664 | Cluster2 #1, **Eury #11** | shallow near-tie (−22k) |
+| cold EM-on-origination (`em_origination.py`, uniform-O) | near-tie | SGA #1, **Eury #6** | shallow near-tie |
+
+Every cold basin-finder tried — uniform init, anti-concentration Simpson barrier, root-mass /
+depth-O priors + homotopy, global-rate warm-up, fused-lasso TV-anneal, and EM-on-O — **fails to
+reach the deep Eury basin** (lands at −1,664k…−1,712k, SGA-favouring). The deep Eury optimum needs
+the AleRax structured-rate warm start. **This is why the rfx-centroid and 2-class-O fits in §B root
+TackA:** the rfx centroid is one of these *shallow* basins, not the deep Eury optimum — so warm-
+starting any branchwise (or EM) fit from the paper's DTL_br2 rates (§B uniform-O-paper, §C) is the
+methodologically correct way to test the deep basin. Commands/jobs: `eval_bigtree_at_alerax.py`
+(AXgrp, `--clade-groups <AleRax dir> --init-from-alerax`), `au_fullbasin.py`, cold jobs
+`{BARtest,VERTtest,ROOTCOLD}_*`, `em_origination.py` (cold-O sweep). Full record:
+memory `project-undine-bigtree-rooting`.
+
 ---
 
 ## B. Models that ROOT AT TackA — the ORIGINATION dependence (this session)
