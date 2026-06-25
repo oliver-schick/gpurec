@@ -88,7 +88,7 @@
   <p class="eyebrow"><span>OIST · Szöllősi&nbsp;Unit</span><span>Williams&nbsp;2017 · archaeal&nbsp;DTL</span><span><b>2026-06-25</b></span></p>
 
   <h1><span class="a">gpurec</span><span class="vs">vs</span><span class="b">AleRax</span></h1>
-  <p class="lede">A GPU reimplementation of AleRax's undated duplication–transfer–loss reconciliation likelihood, benchmarked head-to-head on the Williams 2017 archaeal gene families. <b>Same model, same families, same fixed species tree</b> — only the engine differs.</p>
+  <p class="lede">A GPU reimplementation of AleRax's undated duplication–transfer–loss reconciliation likelihood, benchmarked head-to-head on the Williams 2017 archaeal gene families. <b>Same families, same fixed species tree, same likelihood</b> — only the engine differs. On the global model gpurec is 4× faster; on the full per-branch model it's the only one that finishes.</p>
 
   <div class="race">
     <div class="race-head">
@@ -107,8 +107,8 @@
   </div>
 
   <div class="ok">
-    <span class="r">r = 0.999997</span>
-    <span class="txt"><b>And it's the same likelihood.</b> Per-family log-likelihood of gpurec evaluated at AleRax's own fitted rates, correlated against AleRax across all 5,446 families. The tiny constant offset is a CCP-normalization convention, independent of the rates.</span>
+    <span class="r">r ≈ 1</span>
+    <span class="txt"><b>And it's the same likelihood — for both models.</b> Per-family log-likelihood of gpurec at AleRax's own fitted rates, across all 5,446 families: <b>global r = 0.999997</b>, <b>branch-wise (per-branch D/T/L + O) r = 0.999995</b>. The small constant offset is a CCP-normalization convention, independent of the rates.</span>
   </div>
 
   <section>
@@ -139,18 +139,18 @@
           <td>177</td><td>84 s</td><td>420</td>
         </tr>
         <tr class="spec">
-          <td class="lab">Per-species · pilot</td>
+          <td class="lab">Branch-wise · full</td>
           <td><span class="tool"><span class="dot g"></span>gpurec</span></td>
-          <td>177</td><td>210 s</td><td>1,186</td><td rowspan="2" class="win" style="vertical-align:middle">≫</td>
+          <td>3,946</td><td>1,396 s&nbsp;(23m)</td><td>354</td><td rowspan="2" class="win" style="vertical-align:middle">gpurec&nbsp;only</td>
         </tr>
         <tr class="spec">
-          <td class="lab">Per-species · pilot</td>
+          <td class="lab">Branch-wise · full</td>
           <td><span class="tool"><span class="dot a"></span>AleRax</span></td>
-          <td>177</td><td>&gt; 1 h</td><td>—</td>
+          <td>—</td><td>infeasible</td><td>—</td>
         </tr>
       </tbody>
     </table>
-    <p class="note">The speed-up grows with scale (2.5× → 4.1×) as gpurec amortizes its fixed GPU/setup cost. Global is AleRax's <em>most</em> competitive model: on per-species (per-branch) rates AleRax exceeded an hour on just 177 families and was stopped, while gpurec finished in 210 s.</p>
+    <p class="note">The speed-up grows with scale (2.5× → 4.1×) as gpurec amortizes its fixed cost — and global is AleRax's <em>most</em> competitive model. On the full <b>per-branch</b> model (357 parameters) gpurec fits all 3,946 families in 23 min; AleRax exceeded an hour on just 177 (1/22 of the data) and was stopped — yet gpurec's branch-wise likelihood still matches AleRax's reference at r = 0.999995.</p>
   </section>
 
   <section>
@@ -173,6 +173,6 @@
       <div><dt>AleRax</dt><dd><b>Deigo</b> · v1.4.1 · 64 MPI ranks across 8 EPYC nodes</dd></div>
       <div><dt>Measurement</dt><dd>Wall-clock via <b>ruse</b> + each tool's own timer; correctness via per-family log-likelihood at matched rates</dd></div>
     </dl>
-    <p class="foot">gpurec ≡ AleRax likelihood · ~4× faster at scale · reproducible via the benchmark pipeline in the gpurec repo</p>
+    <p class="foot">gpurec ≡ AleRax likelihood (global & branch-wise) · 4× faster on global · the only one that fits the full per-branch model · reproducible via benchmark/ in the gpurec repo</p>
   </section>
 </div>

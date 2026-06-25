@@ -22,6 +22,19 @@ artifact).
 fitted global rates over all 5,446 families; the small constant offset is a
 CCP-normalization convention, independent of the rates).
 
+**The full per-branch model (357 params) — the one AleRax can't run at scale:**
+gpurec fits all 3,946 families in **23 min** (1,396 s, 53 L-BFGS steps); AleRax
+exceeded an hour on just 177 families (1/22 of the data) and was stopped. gpurec's
+branch-wise likelihood still matches AleRax's *shipped* reference at
+*r* = **0.999995** (per-branch D/T/L + origination O).
+
+### Correctness — both models validated
+
+| model | params | likelihood vs AleRax (per-family logL, r) |
+|-------|--------|-------------------------------------------|
+| global      | 3   | **0.999997** |
+| branch-wise | 357 | **0.999995** (per-branch D/T/L + O) |
+
 ## All runs
 
 | run | tool | families | wall | speed-up |
@@ -30,13 +43,18 @@ CCP-normalization convention, independent of the rates).
 | global · full   | AleRax | 3,946 | 1,999 s |          |
 | global · pilot  | gpurec | 177   | 34 s    | **2.5×** |
 | global · pilot  | AleRax | 177   | 84 s    |          |
-| per-species · pilot | gpurec | 177 | 210 s | **≫** |
-| per-species · pilot | AleRax | 177 | > 1 h (stopped) | |
+| branch-wise · full | gpurec | 3,946 | 1,396 s (23 min) | **gpurec only** |
+| branch-wise · full | AleRax | —     | infeasible (>1 h on 177) | |
 
 The speed-up grows with scale (gpurec amortizes fixed GPU/setup cost). **Global is
-AleRax's most competitive model**: on per-species (per-branch) rates AleRax
-exceeded an hour on just 177 families and was stopped, while gpurec finished in
-210 s.
+AleRax's most competitive model.** On the full **per-branch** model (357 params)
+gpurec fits all 3,946 families in 23 min; AleRax exceeded an hour on just 177
+families and was stopped — yet gpurec's branch-wise likelihood still matches
+AleRax's reference at *r* = 0.999995, so it's validated, not just faster.
+
+A free per-branch fit (uniform origination) on the full set is well-behaved
+(median D/L/T = 0.026 / 0.36 / 0.094; max ~18, no degenerate spikes) — see
+`bin/40_run_gpurec.sh` with `MODE=specieswise`.
 
 ## What made it a fair comparison
 
