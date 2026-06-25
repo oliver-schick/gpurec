@@ -32,11 +32,9 @@ SGA = {"Cluster2", "Micra5", "MicraDia", "AMD", "Asgard", "Alti", "UndineClu2"}
 CHUNK = 500
 
 
-def root_pi_and_E(root, D, L, T, fm_mode, dev, dtype):
-    """Forward at GLOBAL (D,L,T) -> per-family root-clade Pi [F,S] (numpy) + mean extinction."""
-    from gpurec.core.extract_parameters import extract_parameters_uniform
-    from gpurec.core.likelihood import E_fixed_point
-    from gpurec.core.forward import Pi_wave_forward
+def _load_root(root, fm_mode, dev, dtype):
+    """Load families + wave layouts + species helpers ONCE for a root (the expensive ~138s
+    part). Reused across all regime forwards so a 50-regime scan is one load + 50 cheap fwds."""
     from gpurec.core.tree_prior import species_parent_index
     tree = DD / "4_species_tree" / f"Undine_C60_{root}root_short_name.nw"
     sp = _load_species_helpers(str(tree)); S = int(sp["S"]); s2i = sp["species_name_to_index"]
@@ -49,37 +47,69 @@ def root_pi_and_E(root, D, L, T, fm_mode, dev, dtype):
         fm, _n, _s = _parse_fraction_missing(DD / "fraction_missing", s2i, S)
         leaf_E = _build_leaf_E(sp, fm, S, dtype)[0].to(device=dev, dtype=dtype)
         leaf_obs = leaf_E if fm_mode == "both" else None
-    theta = torch.log2(torch.tensor([D, L, T], dtype=dtype, device=dev)).reshape(1, 3).repeat(S, 1)
-    lp = extract_parameters_uniform(theta, urm, specieswise=True)
-    E = E_fixed_point(species_helpers=sp_gpu, log_pS=lp[0], log_pD=lp[1], log_pL=lp[2],
-                      transfer_mat=lp[3], max_transfer_mat=lp[4], max_iters=4000, tolerance=1e-10,
-                      warm_start_E=None, dtype=dtype, device=dev, pibar_mode="uniform",
-                      ancestors_T=anc, leaf_E=leaf_E)
-    rows = []
-    for i in range(0, len(fams), CHUNK):
-        wl, rc = _build_wave_layout(fams[i:i + CHUNK], dev, dtype)
-        Pi = Pi_wave_forward(wave_layout=wl, species_helpers=sp_gpu, E=E["E"], Ebar=E["E_bar"],
-                             E_s1=E["E_s1"], E_s2=E["E_s2"], log_pS=lp[0], log_pD=lp[1], log_pL=lp[2],
-                             transfer_mat=lp[3], max_transfer_mat=lp[4], device=dev, dtype=dtype,
-                             pibar_mode="uniform", leaf_obs_log=leaf_obs)["Pi"]
-        rows.append(Pi[rc].cpu().numpy())                      # [chunk, S] root-clade Pi (log2)
-    root_pi = np.concatenate(rows, 0)                           # [F, S]
-    mean_E = float(torch.exp2(E["E"]).mean().item())
-    names = list(sp["names"])
-    # map labelled clades -> gpurec node index (for reading mixture components)
-    label2node = {}
+    layouts = [_build_wave_layout(fams[i:i + CHUNK], dev, dtype) for i in range(0, len(fams), CHUNK)]
+    names = list(sp["names"]); label2node = {}
     try:
         from clade_groups import parse_labeled_newick, species_node_leafsets
-        leafsets = species_node_leafsets(sp, S)
-        labeled = parse_labeled_newick(str(tree))
+        leafsets = species_node_leafsets(sp, S); labeled = parse_labeled_newick(str(tree))
         for s in range(S):
             lab = labeled.get(leafsets[s])
             if lab:
                 label2node[lab] = s
     except Exception as e:  # noqa: BLE001
         print(f"  [warn] clade labels unavailable: {e}", flush=True)
-    E_vec = E["E"].detach().cpu().numpy()                        # [S] log2 extinction per branch
-    return root_pi, S, root_branch, mean_E, names, label2node, E_vec
+    return dict(sp_gpu=sp_gpu, anc=anc, urm=urm, leaf_E=leaf_E, leaf_obs=leaf_obs, layouts=layouts,
+                S=S, rb=root_branch, names=names, lab2n=label2node, nfam=len(fams))
+
+
+def _forward_regime(Lo, D, L, T, dev, dtype):
+    """Forward at GLOBAL (D,L,T) using a pre-loaded root -> root_pi[F,S] + E[S] (both numpy)."""
+    from gpurec.core.extract_parameters import extract_parameters_uniform
+    from gpurec.core.likelihood import E_fixed_point
+    from gpurec.core.forward import Pi_wave_forward
+    S = Lo["S"]
+    theta = torch.log2(torch.tensor([D, L, T], dtype=dtype, device=dev)).reshape(1, 3).repeat(S, 1)
+    lp = extract_parameters_uniform(theta, Lo["urm"], specieswise=True)
+    E = E_fixed_point(species_helpers=Lo["sp_gpu"], log_pS=lp[0], log_pD=lp[1], log_pL=lp[2],
+                      transfer_mat=lp[3], max_transfer_mat=lp[4], max_iters=4000, tolerance=1e-10,
+                      warm_start_E=None, dtype=dtype, device=dev, pibar_mode="uniform",
+                      ancestors_T=Lo["anc"], leaf_E=Lo["leaf_E"])
+    rows = []
+    for (wl, rc) in Lo["layouts"]:
+        Pi = Pi_wave_forward(wave_layout=wl, species_helpers=Lo["sp_gpu"], E=E["E"], Ebar=E["E_bar"],
+                             E_s1=E["E_s1"], E_s2=E["E_s2"], log_pS=lp[0], log_pD=lp[1], log_pL=lp[2],
+                             transfer_mat=lp[3], max_transfer_mat=lp[4], device=dev, dtype=dtype,
+                             pibar_mode="uniform", leaf_obs_log=Lo["leaf_obs"])["Pi"]
+        rows.append(Pi[rc].cpu().numpy())
+    return np.concatenate(rows, 0), E["E"].detach().cpu().numpy()
+
+
+def root_pi_and_E(root, D, L, T, fm_mode, dev, dtype):
+    """Forward at GLOBAL (D,L,T) -> per-family root-clade Pi [F,S] + mean E + helpers (thin wrapper)."""
+    Lo = _load_root(root, fm_mode, dev, dtype)
+    root_pi, E_vec = _forward_regime(Lo, D, L, T, dev, dtype)
+    return (root_pi, Lo["S"], Lo["rb"], float(np.exp2(E_vec).mean()), Lo["names"], Lo["lab2n"], E_vec)
+
+
+def _shared_o_em_torch(RP, omE, iters=300):
+    """Shared-O rate random-effects EM on stacked [K,F,S] / [K,S] torch tensors.
+    Returns (marginal_logL, gamma[K,F], log_pO[S])."""
+    import torch, math as _m
+    LN2 = _m.log(2.0); K, F, S = RP.shape
+    lse2 = lambda x, d, kd=False: torch.logsumexp(x * LN2, dim=d, keepdim=kd) / LN2  # noqa: E731
+    log_w = torch.full((K,), -_m.log2(K), device=RP.device)
+    log_pO = torch.full((S,), -_m.log2(S), device=RP.device); prev = -1e30; gamma = None
+    for _ in range(iters):
+        m = log_pO[None, None, :] + RP; num = lse2(m, 2)
+        surv = torch.log2((torch.exp2(log_pO)[None, :] * omE).sum(1).clamp_min(1e-30))
+        joint = log_w[:, None] + (num - surv[:, None]); Pf = lse2(joint, 0); ll = float(Pf.sum().item())
+        gamma = torch.exp2(joint - Pf[None, :]); log_w = torch.log2((gamma.mean(1)).clamp_min(1e-30))
+        pbs = torch.exp2(m - lse2(m, 2, True)); Of = (gamma[:, :, None] * pbs).sum(0).sum(0)
+        log_pO = torch.log2((Of / Of.sum()).clamp_min(1e-30))
+        if abs(ll - prev) < 1e-2:
+            break
+        prev = ll
+    return ll, gamma, log_pO
 
 
 def _lse2(x, axis=-1, keepdims=False):
@@ -359,6 +389,34 @@ def shared_o_rate_mixture_em(npz_dir, iters=300, node511=511):
     return dict(log_pO=log_pO.cpu().numpy(), log_w=log_w.cpu().numpy(), rb=rb)
 
 
+def rooting_rfx(root, fm_mode, dev, dtype, out_dir=None, iters=300):
+    """GLOBAL-OPTIMUM-OVER-ROOTS under the per-family RANDOM-EFFECTS model: load the root
+    once, forward all MIX_GRID regimes (per-family rate = the regime mixture), run the
+    shared-O EM -> the marginal data logL = the root's score. Saves gamma + shared p^O for
+    the genome read-out. Free of the per-branch DTL freedom that gave the SGA/Cluster2 root
+    artifact -> tests whether the random-effects model recovers the Eury root region."""
+    import torch
+    Lo = _load_root(root, fm_mode, dev, dtype)
+    RP_list, E_list = [], []
+    for (D, L, T) in MIX_GRID:
+        rp, Ev = _forward_regime(Lo, D, L, T, dev, dtype)
+        RP_list.append(rp.astype(np.float32)); E_list.append(Ev)
+    RP = torch.stack([torch.from_numpy(r) for r in RP_list]).to(dev, torch.float32)
+    omE = torch.stack([torch.from_numpy(np.maximum(1.0 - np.exp2(E), 1e-300).astype(np.float32))
+                       for E in E_list]).to(dev)
+    ll, gamma, log_pO = _shared_o_em_torch(RP, omE, iters=iters)
+    rb = Lo["rb"]; pO = torch.exp2(log_pO).cpu().numpy()
+    print(f"ROOTSCORE\t{root}\tlogL={ll:.2f}\tnfam={Lo['nfam']}\tpO_root={pO[rb]:.4f}", flush=True)
+    if out_dir:
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(f"{out_dir}/rfx_{root}.npz", logL=ll, nfam=Lo["nfam"], rb=rb,
+                            log_pO=log_pO.cpu().numpy(), gamma=gamma.cpu().numpy().astype(np.float16),
+                            dlts=np.array(MIX_GRID), names=np.array(Lo["names"], dtype=object),
+                            labels=np.array(list(Lo["lab2n"].keys()), dtype=object),
+                            label_nodes=np.array(list(Lo["lab2n"].values()), dtype=np.int64))
+    return ll
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dlt", default="0.048,0.287,0.248", help="global D,L,T (AleRax-global default)")
@@ -376,6 +434,9 @@ def main():
                     help="run the regime-mixture EM over regime_*.npz in this dir (CPU/numpy).")
     ap.add_argument("--shared-o", action="store_true",
                     help="with --mixture-npz: per-family rate random-effect + ONE SHARED p^O (step 1).")
+    ap.add_argument("--rooting-rfx", action="store_true",
+                    help="score the --roots root(s) under the per-family random-effects model "
+                         "(marginal logL over the MIX_GRID rate mixture); --out-dir saves rfx_<root>.npz.")
     args = ap.parse_args()
 
     # regime-mixture / shared-O rate random-effects EM over precomputed forwards.
@@ -397,6 +458,12 @@ def main():
     if args.save_forward_idx >= 0:
         r = roots[0]
         save_forward(r, args.save_forward_idx, args.fm_mode, args.out_dir, dev, dtype)
+        return 0
+
+    # GPU path: rooting under the per-family random-effects model (marginal logL per root).
+    if args.rooting_rfx:
+        for r in roots:
+            rooting_rfx(r, args.fm_mode, dev, dtype, out_dir=args.out_dir, iters=args.em_iters * 2)
         return 0
 
     if args.mixture_k > 1:
