@@ -109,7 +109,11 @@ def _shared_o_em_torch(RP, omE, iters=300):
         if abs(ll - prev) < 1e-2:
             break
         prev = ll
-    return ll, gamma, log_pO
+    # per-family marginal logL at the CONVERGED (w, p^O) -- for the AU test / model selection
+    m = log_pO[None, None, :] + RP; num = lse2(m, 2)
+    surv = torch.log2((torch.exp2(log_pO)[None, :] * omE).sum(1).clamp_min(1e-30))
+    Pf = lse2(log_w[:, None] + (num - surv[:, None]), 0)
+    return ll, gamma, log_pO, Pf
 
 
 def _lse2(x, axis=-1, keepdims=False):
@@ -404,13 +408,14 @@ def rooting_rfx(root, fm_mode, dev, dtype, out_dir=None, iters=300):
     RP = torch.stack([torch.from_numpy(r) for r in RP_list]).to(dev, torch.float32)
     omE = torch.stack([torch.from_numpy(np.maximum(1.0 - np.exp2(E), 1e-300).astype(np.float32))
                        for E in E_list]).to(dev)
-    ll, gamma, log_pO = _shared_o_em_torch(RP, omE, iters=iters)
+    ll, gamma, log_pO, Pf = _shared_o_em_torch(RP, omE, iters=iters)
     rb = Lo["rb"]; pO = torch.exp2(log_pO).cpu().numpy()
     print(f"ROOTSCORE\t{root}\tlogL={ll:.2f}\tnfam={Lo['nfam']}\tpO_root={pO[rb]:.4f}", flush=True)
     if out_dir:
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         np.savez_compressed(f"{out_dir}/rfx_{root}.npz", logL=ll, nfam=Lo["nfam"], rb=rb,
                             log_pO=log_pO.cpu().numpy(), gamma=gamma.cpu().numpy().astype(np.float16),
+                            perfam_logL=Pf.cpu().numpy().astype(np.float32),
                             dlts=np.array(MIX_GRID), names=np.array(Lo["names"], dtype=object),
                             labels=np.array(list(Lo["lab2n"].keys()), dtype=object),
                             label_nodes=np.array(list(Lo["lab2n"].values()), dtype=np.int64))
