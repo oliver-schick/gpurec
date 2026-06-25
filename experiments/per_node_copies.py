@@ -126,11 +126,18 @@ def main():
             raise SystemExit("need --sidecar or --alerax-model")
         d = json.load(open(args.sidecar))
         theta = torch.tensor(d["theta_log2"], dtype=dtype, device=dev).reshape(S, 3)
-        om = d.get("origination", {}).get("omega_log2")
-        if om is None:
-            log_pO = torch.full((S,), -math.log2(S), dtype=dtype, device=dev)
+        od = d.get("origination", {})
+        # Prefer the EXACT p^O the fit used (origination_prob) -- this carries any
+        # origination floor / structured-O exactly. Fall back to softmax(omega), then
+        # uniform. (A raw softmax(omega) would DROP the floor for floor-runs.)
+        if od.get("origination_prob") is not None:
+            p = torch.tensor(od["origination_prob"], dtype=dtype, device=dev).reshape(S)
+            log_pO = torch.log2(p / p.sum())
+        elif od.get("omega_log2") is not None:
+            om = torch.tensor(od["omega_log2"], dtype=dtype, device=dev).reshape(S)
+            log_pO = om - _lse2(om, 0)
         else:
-            om = torch.tensor(om, dtype=dtype, device=dev).reshape(S); log_pO = om - _lse2(om, 0)
+            log_pO = torch.full((S,), -math.log2(S), dtype=dtype, device=dev)
 
     lim = args.families
     fams, _ = _load_families(ALE, s2i, min_species=1, dtype=dtype, limit=lim)
