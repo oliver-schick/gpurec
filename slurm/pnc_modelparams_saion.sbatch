@@ -4,7 +4,7 @@
 #SBATCH --error=%x_%j.out
 #SBATCH --requeue
 set -uo pipefail
-: "${GPUREC_DIR:?}"; : "${ROOT:=Eury}"; : "${MP:?}"; : "${ATREE:?}"; : "${OUT:?}"; : "${NSAMP:=500}"; : "${PY_MODULE:=python/3.11.11}"
+: "${GPUREC_DIR:?}"; : "${ROOT:=Eury}"; : "${MP:?}"; : "${ATREE:?}"; : "${OUT:?}"; : "${NSAMP:=500}"; : "${FM:=e-only}"; : "${PY_MODULE:=python/3.11.11}"
 cd "$GPUREC_DIR"; export TORCH_EXTENSIONS_DIR="$GPUREC_DIR/.torch_ext"
 [ -d ".venv/bin" ] && export PATH="$GPUREC_DIR/.venv/bin:$PATH"
 module load "$PY_MODULE" 2>/dev/null || true
@@ -13,4 +13,4 @@ for SO in .torch_ext/preprocess_cpp/preprocess_cpp.so .torch_ext/recon_sampler/r
 PY=".venv/bin/python"; [ -x "$PY" ] || PY="python3.11"
 echo "=== validate gpurec @ paper reconstruction rates: $MP ==="
 PYTHONPATH=. "$PY" experiments/per_node_copies.py --root "$ROOT" --model-params "$MP" --atree "$ATREE" \
-  --engine cpp --n-samples "$NSAMP" --out "$OUT" 2>&1 | tail -25
+  --fm-mode "$FM" --engine cpp --n-samples "$NSAMP" --out "$OUT" 2>&1 | tail -25
