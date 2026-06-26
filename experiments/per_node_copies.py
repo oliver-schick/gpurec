@@ -301,9 +301,11 @@ def main():
         print(f"  Σ presence cpp={vc_pres.sum():.1f}  py={vp_pres.sum():.1f}  "
               f"ratio={vc_pres.sum()/max(1e-9, vp_pres.sum()):.4f}  per-species r={_corr(vc_pres, vp_pres):.5f}")
 
-    # VALIDATION (self-contained): sampled vs analytic origination-at-root.
-    # presence@root == origination@root (the root is occupied only by origination).
-    samp_root = float(orig_root.sum()) if args.engine == "py" else float(presence[:, root_branch].sum())
+    # VALIDATION (self-contained): sampled vs analytic origination-at-root. Origination is
+    # the BIRTH count at the root; presence@root is now <= it (a family can originate at the
+    # root yet leave no surviving copy there -- TL away / loss -- exactly as in AleRax), so we
+    # validate the ORIGINATION count, not presence.
+    samp_root = float(orig_root.sum()) if args.engine == "py" else float(ev_acc["orig"][root_branch] / args.n_samples)
     print("\n" + "=" * 60)
     print(f"VALIDATION origination@root:  sampled={samp_root:.1f}   analytic={pp_root_an_sum:.1f}   "
           f"diff={samp_root - pp_root_an_sum:+.1f}  (should match within ~sqrt(F/N))")
