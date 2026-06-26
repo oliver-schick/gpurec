@@ -240,7 +240,9 @@ def main():
                 if f < args.validate_n:        # cross-check the compiled engine vs pure Python
                     pp = np.zeros(S); cp = np.zeros(S)
                     for sc in sample_family(fwd, args.n_samples, rng):
-                        for s in sc.occupied:
+                        occ = {ev.species for ev in sc.events
+                               if ev.type in COPY_EXIT and 0 <= ev.species < S}
+                        for s in occ:                  # presence = >=1 surviving copy (AleRax eventCount[4])
                             pp[s] += 1
                         for ev in sc.events:
                             if ev.type in COPY_EXIT and 0 <= ev.species < S:
@@ -249,14 +251,16 @@ def main():
                     vc_cop += rc_["copies"]; vp_cop += cp
             else:
                 for sc in sample_family(fwd, args.n_samples, rng):
-                    for s in sc.occupied:
-                        presence[f, s] += 1
+                    occ = set()
                     for ev in sc.events:
                         if 0 <= ev.species < S:
                             if ev.type in COPY_EXIT:
                                 copies[f, ev.species] += 1
+                                occ.add(ev.species)        # presence = >=1 surviving copy (S/SL/leaf)
                             if ev.type in ALL_EV:
                                 copies_all[f, ev.species] += 1
+                    for s in occ:                          # AleRax eventCount[4]: set only at S/SL/leaf
+                        presence[f, s] += 1
                     if sc.events and sc.events[0].species == root_branch:
                         orig_root[f] += 1
             rr = lpO + Pi_b[int(rc_bn[j])]                      # analytic origination@root (validation)

@@ -5,7 +5,8 @@
 // AleRax MultiModel::backtrace / ALE sample_undated -- and accumulates, per
 // species branch s:
 //   copies[s]   += #{S, SL, leaf} events at s   (ALE branch_counts["copies"])
-//   presence[s] += 1 per sample in which s is occupied
+//   presence[s] += 1 per sample in which s has >=1 surviving copy (S/SL/leaf exit) --
+//                   exactly AleRax Scenario eventCount[4] (NOT mere visit/D/T/TL-transit)
 //
 // Event weights at clade c on species s (children s1,s2), per split c->(L,R):
 //   D : pD*Pi[L,s]*Pi[R,s]   T(R moves): Pi[L,s]*Pibar[R,s]   T(L moves): Pi[R,s]*Pibar[L,s]
@@ -93,7 +94,13 @@ struct Acc { double *pres, *cop, *dup, *trn, *los, *spc, *trnin; };  // trnin = 
 void backtrace(const Fam &f, int cid, int s, Rng &rng, std::vector<Act> &scratch,
                std::vector<int64_t> &stamp, int64_t sample_id, Acc &acc) {
   const int S = f.S;
-  if (stamp[s] != sample_id) { stamp[s] = sample_id; acc.pres[s] += 1.0; }  // occupied
+  // presence = 1 per sample iff a SURVIVING copy (S/SL/leaf) exits at s -- exactly
+  // AleRax Scenario::gatherReconciliationStatistics eventCount[4], which is set to 1
+  // only on EVENT_S / EVENT_SL / EVENT_None(leaf), NOT on mere visit / D / transfer-
+  // source / TL-transit. stamp[] dedups to one mark per (node, sample).
+  auto mark_present = [&](int sp) {
+    if (stamp[sp] != sample_id) { stamp[sp] = sample_id; acc.pres[sp] += 1.0; }
+  };
   const int s1 = (int)f.c1[s], s2 = (int)f.c2[s];
   const bool has_children = (s1 != S);
 
@@ -136,11 +143,11 @@ void backtrace(const Fam &f, int cid, int s, Rng &rng, std::vector<Act> &scratch
 
     if (a.kind == K_DL || a.kind == K_TLLOST) continue;   // self-loop: resample same cell
     switch (a.kind) {
-      case K_LEAF:   acc.cop[s] += 1.0; return;
-      case K_S:      acc.cop[s] += 1.0; acc.spc[s] += 1.0;
+      case K_LEAF:   mark_present(s); acc.cop[s] += 1.0; return;
+      case K_S:      mark_present(s); acc.cop[s] += 1.0; acc.spc[s] += 1.0;
                      backtrace(f, a.L, a.sa, rng, scratch, stamp, sample_id, acc);
                      backtrace(f, a.R, a.sb, rng, scratch, stamp, sample_id, acc); return;
-      case K_SL:     acc.cop[s] += 1.0; acc.spc[s] += 1.0;
+      case K_SL:     mark_present(s); acc.cop[s] += 1.0; acc.spc[s] += 1.0;
                      acc.los[(a.sa == s1) ? s2 : s1] += 1.0;          // loss of non-surviving child
                      backtrace(f, cid, a.sa, rng, scratch, stamp, sample_id, acc); return;
       case K_D:      acc.dup[s] += 1.0;
