@@ -32,6 +32,11 @@ if module load gcc/14.2.0 2>/dev/null; then
 fi
 for SO in .torch_ext/preprocess_cpp/preprocess_cpp.so .torch_ext/recon_sampler/recon_sampler.so; do [ -f "$SO" ] && touch "$SO"; done
 PY=".venv/bin/python"; [ -x "$PY" ] || PY="python3.11"
+# Per-task node-local Triton cache: concurrent array tasks racing on the shared
+# NFS ~/.triton cache caused "OSError: [Errno 116] Stale file handle" during JIT
+# kernel compile (killed roots 1/2/4/5). Isolate per (job,task) on node-local /tmp.
+export TRITON_CACHE_DIR="${SLURM_TMPDIR:-/tmp}/triton_${SLURM_JOB_ID:-x}_${SLURM_ARRAY_TASK_ID:-0}"
+mkdir -p "$TRITON_CACHE_DIR"
 mkdir -p "$OUTDIR"
 
 if [ "$MODE" = "au" ]; then
