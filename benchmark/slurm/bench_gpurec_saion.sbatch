@@ -12,10 +12,16 @@
 set -euo pipefail
 
 : "${GPUREC_DIR:?must be exported}"      # gpurec checkout (branch cpp-rust-free)
-: "${WILLIAMS_DIR:?must be exported}"    # dir with ccps/ rooted_phylogeny/ fraction_missing
-: "${ROOT:?must be exported}"            # e.g. DPANN
+: "${DATASET:=williams}"                 # williams (data-dir/root) | davin (explicit paths)
 : "${OUT_RATES:?must be exported}"       # rates output file
 : "${RUSE_OUT:?must be exported}"        # ruse summary file
+# williams inputs:
+: "${WILLIAMS_DIR:=}"                    # dir with ccps/ rooted_phylogeny/ fraction_missing
+: "${ROOT:=DPANN}"
+# davin (explicit) inputs:
+: "${DS_TREE:=}"                         # rooted species tree (newick)
+: "${DS_ALE_GLOB:=}"                     # glob for .ale, e.g. /…/ALEs/*.ale
+: "${DS_FM:=}"                           # whitespace fraction_missing file
 : "${FAMILIES:=0}"                       # 0 = all families, else first N (pilot)
 : "${STEPS:=200}"
 : "${DTYPE:=float64}"
@@ -83,8 +89,15 @@ PYEOF
 
 mkdir -p "$(dirname "$OUT_RATES")" "$(dirname "$RUSE_OUT")"
 
-ARGS=( experiments/bench_gpurec_fit.py --mode "$GMODE"
-       --root "$ROOT" --data-dir "$WILLIAMS_DIR"
+# Input args differ by dataset: williams uses the data-dir/root layout;
+# davin passes an explicit tree + .ale glob (quoted so the shell does NOT expand
+# the glob -- the driver globs it internally) + the converted fraction_missing.
+if [ "$DATASET" = davin ]; then
+  IN_ARGS=( --species-tree "$DS_TREE" --ale-glob "$DS_ALE_GLOB" --fraction-missing "$DS_FM" )
+else
+  IN_ARGS=( --root "$ROOT" --data-dir "$WILLIAMS_DIR" )
+fi
+ARGS=( experiments/bench_gpurec_fit.py --mode "$GMODE" "${IN_ARGS[@]}"
        --families "$FAMILIES" --steps "$STEPS" --dtype "$DTYPE"
        --min-species "$MIN_SPECIES" --fm-mode "$FM_MODE"
        --family-batch-size "$FAMILY_BATCH_SIZE" --out "$OUT_RATES" )

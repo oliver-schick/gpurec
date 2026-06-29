@@ -45,10 +45,11 @@ pull() {
   rsync -az -e "ssh -o BatchMode=yes" "${host}:${src}" "$dstdir/"
 }
 
-# Tag for output files: <mode>_<root>_<phase>_<N>
+# Tag for output files: <mode>_<dataset-tag>_<phase>_<N>
+# DS_TAG is the rooting (williams, e.g. DPANN) or "davin" -- set in config.sh.
 run_tag() {
   local phase="$1" n="$2"
-  printf '%s_%s_%s_%s' "$MODE" "$ROOT" "$phase" "$n"
+  printf '%s_%s_%s_%s' "$MODE" "${DS_TAG:-$ROOT}" "$phase" "$n"
 }
 
 require_not_placeholder() {

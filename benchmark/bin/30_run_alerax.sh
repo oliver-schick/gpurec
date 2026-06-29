@@ -8,22 +8,22 @@ case "$PHASE" in pilot) N="$PILOT_N";; full) N="$FULL_N";; *) die "phase must be
 
 TAG="$(run_tag "$PHASE" "$N")"
 FAM="$DEIGO_BENCH_DIR/families_${PHASE}.txt"
-SP="$WILLIAMS_DIR_DEIGO/rooted_phylogeny/$ROOT"
-FM_RAW="$WILLIAMS_DIR_DEIGO/fraction_missing"
-FM="$DEIGO_BENCH_DIR/fraction_missing_${ROOT}.filtered"
+SP="$DS_TREE_DEIGO"                 # rooted_phylogeny/<ROOT> (williams) or ReferenceTree.nwk (davin)
+FM_RAW="$DS_FM_DEIGO"               # whitespace 'species fraction' (davin already converted at stage)
+FM="$DEIGO_BENCH_DIR/fraction_missing_${DS_TAG}.filtered"
 OUTDIR="$DEIGO_BENCH_DIR/out/alerax_${TAG}"
 RUSE="$OUTDIR/ruse.txt"
 
 rsh "$DEIGO_SSH" "[ -s '$FAM' ]" || die "missing $FAM -- run bin/20_prepare_families.sh $PHASE first"
 
 # AleRax assert(false)s on any fraction_missing species absent from the tree --
-# a no-op in Release builds, so it instead silently corrupts _fm[0]. The Williams
-# file has 2 extra species (not in DPANN). Filter to the tree's leaf set so
-# AleRax's fraction-missing exactly matches gpurec's (which skips extras).
-log "Filtering fraction_missing to '$ROOT' tree leaves -> $FM"
+# a no-op in Release builds, so it instead silently corrupts _fm[0]. Filter the
+# file to exactly the tree's leaf set so AleRax's fraction-missing matches gpurec's
+# (which skips extras). Harmless when the file already matches (e.g. Davin: 1007=1007).
+log "Filtering fraction_missing to '$DS_TAG' tree leaves -> $FM"
 rsh "$DEIGO_SSH" "
-  grep -oE '[(,][A-Za-z0-9_]+:' '$SP' | sed 's/^[(,]//;s/:\$//' | sort -u > '$DEIGO_BENCH_DIR/.tree_leaves_${ROOT}'
-  awk 'NR==FNR{k[\$1]=1;next} (\$1 in k)' '$DEIGO_BENCH_DIR/.tree_leaves_${ROOT}' '$FM_RAW' > '$FM'
+  grep -oE '[(,][A-Za-z0-9_.]+:' '$SP' | sed 's/^[(,]//;s/:\$//' | sort -u > '$DEIGO_BENCH_DIR/.tree_leaves_${DS_TAG}'
+  awk 'NR==FNR{k[\$1]=1;next} (\$1 in k)' '$DEIGO_BENCH_DIR/.tree_leaves_${DS_TAG}' '$FM_RAW' > '$FM'
   echo \"  fraction_missing filtered to \$(wc -l < '$FM') tree species (raw \$(wc -l < '$FM_RAW'))\"
 " || die "failed to filter fraction_missing"
 

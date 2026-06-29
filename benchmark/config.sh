@@ -110,6 +110,29 @@ ALERAX_AUTOCLONE="${ALERAX_AUTOCLONE:-1}"    # 1 = clone AleRax on Deigo if miss
 LOCAL_WILLIAMS_DIR="${LOCAL_WILLIAMS_DIR:-/media/oliver/LaCie/Lenovo_Extension/17360806/3_Reconciliation/Williams_et_al_2017}"
 LOCAL_ALERAX_DIR="${LOCAL_ALERAX_DIR:-/media/oliver/LaCie/Lenovo_Extension/AleRax}"
 
+# ======================================================================
+# DATASET selector:  williams (default)  |  davin
+# ======================================================================
+# williams = Williams 2017 archaea (60 taxa, multi-root, Zenodo download).
+# davin    = Davin et al. 2025 bacteria (1007-taxon single rooted tree,
+#            5124 .ale ~27 GB, NOT on a public archive -> rsync from /data).
+DATASET="${DATASET:-williams}"
+
+# ---- Davin et al. 2025 paths -----------------------------------------
+# Source on YOUR machine (Davin_2025 folder). Default = Oliver's LaCie drive;
+# a colleague overrides LOCAL_DAVIN_DIR to wherever their copy lives.
+LOCAL_DAVIN_DIR="${LOCAL_DAVIN_DIR:-/media/oliver/LaCie/Lenovo_Extension/Davin_2025}"
+# Within it (verified): the .ale dir, the rooted species tree, fraction_missing.
+DAVIN_ALE_SUBDIR="${DAVIN_ALE_SUBDIR:-Section2.AncestralReconstruction/ALEs}"
+DAVIN_TREE_SUBPATH="${DAVIN_TREE_SUBPATH:-Section01.SpeciesTree/ReferenceTree.nwk}"
+DAVIN_FM_SUBPATH="${DAVIN_FM_SUBPATH:-Section2.AncestralReconstruction/fraction_missing.txt}"
+# Cluster staging: rsync local -> shared /bucket ONCE, then fast per-cluster FS
+# (gpurec reads /work, AleRax reads /flash -- both off fast local storage so the
+# 27 GB doesn't contaminate the runtime).
+DAVIN_BUCKET_DIR="${DAVIN_BUCKET_DIR:-/bucket/$UNIT/$OIST_ID/davin}"
+DAVIN_DIR_SAION="${DAVIN_DIR_SAION:-/work/$UNIT/$OIST_ID/davin}"
+DAVIN_DIR_DEIGO="${DAVIN_DIR_DEIGO:-/flash/$UNIT/$OIST_ID/davin}"
+
 # ---- Experiment parameters -------------------------------------------
 ROOT="${ROOT:-DPANN}"                 # rooted_phylogeny/<ROOT> species tree
 # Rate model. global = one shared D,L,T (fast in AleRax); specieswise = per-branch
@@ -120,6 +143,31 @@ SEED="${SEED:-42}"
 
 PILOT_N="${PILOT_N:-200}"             # families in the pilot pass
 FULL_N="${FULL_N:-0}"                 # 0 = ALL families (the full pass)
+
+# ---- Active dataset paths (resolved from DATASET; used by run scripts) ----
+# Neutral DS_* vars so 30/40/70 don't hardcode a dataset. Per-cluster because
+# gpurec reads Saion-/work and AleRax reads Deigo-/flash.
+case "$DATASET" in
+  williams)
+    DS_TAG="${ROOT}"                                            # output tag (e.g. DPANN)
+    DS_TREE_SAION="$WILLIAMS_DIR_SAION/rooted_phylogeny/$ROOT"
+    DS_TREE_DEIGO="$WILLIAMS_DIR_DEIGO/rooted_phylogeny/$ROOT"
+    DS_ALE_DIR_SAION="$WILLIAMS_DIR_SAION/ccps"
+    DS_ALE_DIR_DEIGO="$WILLIAMS_DIR_DEIGO/ccps"
+    DS_FM_SAION="$WILLIAMS_DIR_SAION/fraction_missing"          # already whitespace
+    DS_FM_DEIGO="$WILLIAMS_DIR_DEIGO/fraction_missing"          # (30_run_alerax filters it)
+    ;;
+  davin)
+    DS_TAG="davin"
+    DS_TREE_SAION="$DAVIN_DIR_SAION/ReferenceTree.nwk"
+    DS_TREE_DEIGO="$DAVIN_DIR_DEIGO/ReferenceTree.nwk"
+    DS_ALE_DIR_SAION="$DAVIN_DIR_SAION/ALEs"
+    DS_ALE_DIR_DEIGO="$DAVIN_DIR_DEIGO/ALEs"
+    DS_FM_SAION="$DAVIN_DIR_SAION/fraction_missing.ws.txt"      # colon->ws, written at stage
+    DS_FM_DEIGO="$DAVIN_DIR_DEIGO/fraction_missing.ws.txt"
+    ;;
+  *) echo "config.sh: unknown DATASET='$DATASET' (use williams|davin)" >&2; return 1 2>/dev/null || exit 1 ;;
+esac
 
 # gpurec optimizer controls (passed to the bench driver bench_gpurec_fit.py)
 GPUREC_STEPS="${GPUREC_STEPS:-200}"

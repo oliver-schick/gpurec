@@ -26,8 +26,13 @@ from run_williams_branchwise import (  # noqa: E402  (same helpers the validated
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="gpurec rate fit (global or specieswise) on Williams .ale")
     ap.add_argument("--mode", choices=["global", "specieswise"], default="global")
+    # Williams-style input: a data dir with rooted_phylogeny/<root> + ccps/.
+    ap.add_argument("--data-dir", default=None)
     ap.add_argument("--root", default="DPANN")
-    ap.add_argument("--data-dir", required=True)
+    # OR explicit input (any rooted tree + a glob of .ale; e.g. Davin):
+    ap.add_argument("--species-tree", default=None, help="rooted species tree (newick)")
+    ap.add_argument("--ale-glob", default=None, help="glob for .ale files, e.g. '/…/ALEs/*.ale'")
+    ap.add_argument("--fraction-missing", default=None, help="whitespace 'species fraction' file")
     ap.add_argument("--families", type=int, default=0, help="0 = all; else first N")
     ap.add_argument("--min-species", type=int, default=4)
     ap.add_argument("--steps", type=int, default=200)
@@ -39,14 +44,25 @@ def main(argv=None) -> int:
     ap.add_argument("--out", required=True)
     args = ap.parse_args(argv)
 
-    data_dir = Path(args.data_dir)
-    if args.root not in KNOWN_ROOTS:
-        print(f"[warn] root {args.root!r} not in {KNOWN_ROOTS}", flush=True)
-    tree_path, ale_paths, fm_path = _resolve_paths(data_dir, args.root, None)
+    import glob as _glob
+    if args.species_tree:                       # explicit input (Davin etc.)
+        if not args.ale_glob:
+            raise SystemExit("--species-tree requires --ale-glob")
+        tree_path = Path(args.species_tree)
+        ale_paths = sorted(p for p in _glob.glob(args.ale_glob)
+                           if not Path(p).name.startswith("._"))
+        fm_path = Path(args.fraction_missing) if args.fraction_missing else Path("/nonexistent")
+    else:                                       # Williams data-dir/root layout
+        if not args.data_dir:
+            raise SystemExit("need either --data-dir (+ --root) or --species-tree (+ --ale-glob)")
+        data_dir = Path(args.data_dir)
+        if args.root not in KNOWN_ROOTS:
+            print(f"[warn] root {args.root!r} not in {KNOWN_ROOTS}", flush=True)
+        tree_path, ale_paths, fm_path = _resolve_paths(data_dir, args.root, None)
     if not tree_path.exists():
         raise SystemExit(f"species tree not found: {tree_path}")
     if not ale_paths:
-        raise SystemExit(f"no .ale under {data_dir/'ccps'}")
+        raise SystemExit(f"no .ale files found (glob/data-dir empty)")
     if not torch.cuda.is_available():
         raise SystemExit("CUDA required (run on an A100).")
     device = torch.device("cuda")

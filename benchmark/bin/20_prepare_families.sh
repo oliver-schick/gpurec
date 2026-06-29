@@ -16,24 +16,28 @@ case "$PHASE" in
 esac
 
 FAM="$DEIGO_BENCH_DIR/families_${PHASE}.txt"
-log "Deigo: building $FAM  (N=$N ; 0=all) from $WILLIAMS_DIR_DEIGO/ccps"
+ALE_DIR="$DS_ALE_DIR_DEIGO"     # ccps/ (williams) or ALEs/ (davin)
+log "Deigo: building $FAM  (N=$N ; 0=all) from $ALE_DIR  [dataset=$DATASET]"
 
-# Remote generator. find (not ls *.ale) to dodge ARG_MAX at 25k files.
+# Remote generator. find (not ls *.ale) to dodge ARG_MAX at thousands of files.
+# Family name = filename up to the first dot (works for both datasets: williams
+# 'fix_1000_c60_lg_combined.ale' and davin 'COG0001_0.faa...ale'). No mapping
+# lines: AleRax auto-maps gene->species by prefix-before-first-'_', as gpurec does.
 rsh "$DEIGO_SSH" "
   set -e
-  CCPS='$WILLIAMS_DIR_DEIGO/ccps'
+  ALE='$ALE_DIR'
   N=$N
   OUT='$FAM'
   mkdir -p '$DEIGO_BENCH_DIR'
-  [ -d \"\$CCPS\" ] || { echo 'ERROR: no ccps dir on deigo (run 10_stage.sh)'; exit 1; }
-  LIST=\$(find \"\$CCPS\" -maxdepth 1 -name '*.ale' ! -name '._*' | sort)
+  [ -d \"\$ALE\" ] || { echo \"ERROR: no .ale dir on deigo: \$ALE (run 10_stage.sh)\"; exit 1; }
+  LIST=\$(find \"\$ALE\" -maxdepth 1 -name '*.ale' ! -name '._*' | sort)
   if [ \"\$N\" -gt 0 ]; then LIST=\$(printf '%s\n' \"\$LIST\" | head -n \"\$N\"); fi
   cnt=\$(printf '%s\n' \"\$LIST\" | sed '/^\$/d' | wc -l)
   {
     echo '[FAMILIES]'
     printf '%s\n' \"\$LIST\" | sed '/^\$/d' | while read -r f; do
-      base=\$(basename \"\$f\" .ale)
-      echo \"- \$base\"
+      name=\$(basename \"\$f\" | cut -d. -f1)
+      echo \"- \$name\"
       echo \"gene_tree = \$f\"
     done
   } > \"\$OUT\"

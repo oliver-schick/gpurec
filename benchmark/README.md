@@ -135,6 +135,32 @@ tarball — never the full 14 GB `reconciliation models/` tree.
 `PILOT_N`, `FULL_N`, `DEIGO_NTASKS` (AleRax MPI ranks), `GPUREC_STEPS`,
 `GPUREC_DTYPE`, `DEIGO_TIME`/`SAION_TIME`, `DEIGO_MODULES`, `SEED`.
 
+## Second dataset: Davin et al. 2025 (`DATASET=davin`)
+
+The kit is dataset-aware. `DATASET=davin` benchmarks the Davin 2025 bacterial set
+(1007-taxon `ReferenceTree.nwk`, 5124 `.ale` ~27 GB, single rooted tree). Same
+machinery; three differences are handled automatically: it's **rsync'd from your
+machine** (not on a public archive) `/data/Davin_2025` → shared `/bucket` (once)
+→ fast per-cluster FS; the `fraction_missing` is **converted** colon→whitespace;
+and the gpurec driver takes the tree + `.ale` glob directly (no `rooted_phylogeny/`).
+Same prefix-before-`_` mapping, so no mapping files.
+
+```bash
+# stage Davin (rsync ~27 GB once to /bucket, then to /work + /flash):
+DATASET=davin ./bin/10_stage.sh
+# global benchmark (gpurec batches families to bound the 1007-taxon memory):
+DATASET=davin ./bin/20_prepare_families.sh full
+DATASET=davin ./bin/30_run_alerax.sh full
+DATASET=davin GPUREC_FAMILY_BATCH_SIZE=500 ./bin/40_run_gpurec.sh full
+DATASET=davin ./bin/status.sh ; ./bin/50_collect.sh ; python3 bin/60_report.py
+```
+
+Outputs are tagged `…_davin_…` (separate from Williams). Notes: gpurec is pinned
+to global first (per-branch on 1007 taxa is heavy — set `MODE=specieswise` later,
+likely with a smaller `GPUREC_FAMILY_BATCH_SIZE`). Davin ships no per-tool AleRax
+*reference* rates, so `bin/70` (which checks gpurec's likelihood vs a shipped
+AleRax reference) is Williams-only; for Davin, compare against your own AleRax run.
+
 ## Files
 
 ```
