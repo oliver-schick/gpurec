@@ -174,6 +174,10 @@ GPUREC_STEPS="${GPUREC_STEPS:-200}"
 GPUREC_DTYPE="${GPUREC_DTYPE:-float64}"
 GPUREC_MIN_SPECIES="${GPUREC_MIN_SPECIES:-4}"   # AleRax drops <4-species families
 GPUREC_FAMILY_BATCH_SIZE="${GPUREC_FAMILY_BATCH_SIZE:-0}"  # 0 = all families at once; raise for full set if OOM
+# Davin families are ~20x bigger; the un-batched forward over many big families
+# triggers a CUDA illegal access (gpurec's own fix was "batch the forward over
+# families"), so default Davin to a modest batch unless you set one.
+if [ "$DATASET" = davin ] && [ "$GPUREC_FAMILY_BATCH_SIZE" = 0 ]; then GPUREC_FAMILY_BATCH_SIZE=50; fi
 # Fraction-missing mode. 'e-only' matches AleRax (missing-data factor in the
 # extinction recursion ONLY) -- per docs/oliver-handoff.md ("Always use it").
 GPUREC_FM_MODE="${GPUREC_FM_MODE:-e-only}"

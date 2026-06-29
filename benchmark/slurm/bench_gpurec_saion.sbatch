@@ -112,6 +112,16 @@ fi
 END=$(date +%s)
 ELAPSED=$(( END - START ))
 
+# Detect failure reliably: ruse/tee swallow python's exit code, so check the
+# driver's success artifact (it writes OUT_RATES only after a clean optimize).
+# Without this, a CUDA crash mid-run would still print a misleading "DONE".
+if [ ! -f "$OUT_RATES" ]; then
+  echo "=== gpurec FAILED: no rates written ($OUT_RATES). See the traceback above. ==="
+  echo "    (common at scale: CUDA illegal access from an un-batched forward over many"
+  echo "     big families -> lower FAMILY_BATCH_SIZE; or a real OOM -> lower it further.)"
+  exit 1
+fi
+
 # The runner already writes <OUT_RATES>.json with elapsed_s + n_families_kept;
 # add a top-level timing record for the collector.
 TIMING="$(dirname "$OUT_RATES")/timing_$(basename "$OUT_RATES" .txt).json"
