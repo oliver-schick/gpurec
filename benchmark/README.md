@@ -132,8 +132,10 @@ tarball — never the full 14 GB `reconciliation models/` tree.
 ## Knobs (`config.sh`)
 
 `ROOT` (default `DPANN`; any of the 10 `rooted_phylogeny/` rootings),
-`PILOT_N`, `FULL_N`, `DEIGO_NTASKS` (AleRax MPI ranks), `GPUREC_STEPS`,
-`GPUREC_DTYPE`, `DEIGO_TIME`/`SAION_TIME`, `DEIGO_MODULES`, `SEED`.
+`PILOT_N`, `FULL_N`, `DEIGO_NTASKS_PILOT`/`DEIGO_NTASKS_FULL` (AleRax MPI ranks,
+phase-aware; `DEIGO_NTASKS` overrides both), `GPUREC_STEPS`,
+`GPUREC_DTYPE`, `DEIGO_TIME`/`SAION_TIME`, `DEIGO_MODULES`, `SEED`,
+`GPUREC_FAMILY_BATCH_SIZE` (default `auto` — GPU-memory-aware sizing; or `0`=all, or an int).
 
 ## Second dataset: Davin et al. 2025 (`DATASET=davin`)
 
@@ -148,16 +150,30 @@ Same prefix-before-`_` mapping, so no mapping files.
 ```bash
 # stage Davin (rsync ~27 GB once to /bucket, then to /work + /flash):
 DATASET=davin ./bin/10_stage.sh
-# global benchmark (gpurec batches families to bound the 1007-taxon memory):
+# global benchmark (gpurec auto-sizes the family batch to bound 1007-taxon memory):
 DATASET=davin ./bin/20_prepare_families.sh full
 DATASET=davin ./bin/30_run_alerax.sh full
-DATASET=davin GPUREC_FAMILY_BATCH_SIZE=500 ./bin/40_run_gpurec.sh full
+DATASET=davin ./bin/40_run_gpurec.sh full
 DATASET=davin ./bin/status.sh ; ./bin/50_collect.sh ; python3 bin/60_report.py
 ```
 
-Outputs are tagged `…_davin_…` (separate from Williams). Notes: gpurec is pinned
-to global first (per-branch on 1007 taxa is heavy — set `MODE=specieswise` later,
-likely with a smaller `GPUREC_FAMILY_BATCH_SIZE`). Davin ships no per-tool AleRax
+Outputs are tagged `…_davin_…` (separate from Williams). Batching is **auto** by
+default and uses a **clade budget**, not a fixed family count: since a batch's peak
+memory scales with its total clade count (`ΣC`), not the number of families, the
+driver reads free GPU memory + the loaded families' `C` and greedily packs
+**variable-size batches** each ≤ the budget (first-fit-decreasing). Many small
+families land in one batch; a single giant family gets its own — so the GPU stays
+near-saturated regardless of how skewed family sizes are. This is correct because
+the optimizer sums per-family gradients (`grad_reduction="sum"`), so the result is
+identical to any other partition. It logs `[auto-batch] … -> N variable batches |
+families/batch a-b | clades/batch …` and the realized peak (`[mem] … GiB`), and
+records `batching`/`batch_plan`/`peak_gib`/`mem_factor` in the rates sidecar (use the
+peak to tighten `--mem-factor` on later runs). Williams (S=60) fits in one batch.
+Override with `GPUREC_FAMILY_BATCH_SIZE=<int>` (fixed count) or `0` (all at once);
+tune `--mem-safety` / `--mem-factor` for fatter/thinner batches. Notes: gpurec is
+pinned to global first (per-branch on 1007 taxa is heavy — set `MODE=specieswise`
+later; auto-batch shrinks the budget accordingly since per-branch `theta` is S×3).
+Davin ships no per-tool AleRax
 *reference* rates, so `bin/70` (which checks gpurec's likelihood vs a shipped
 AleRax reference) is Williams-only; for Davin, compare against your own AleRax run.
 

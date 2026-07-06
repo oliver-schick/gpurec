@@ -78,6 +78,20 @@ fi
 END=$(date +%s)
 ELAPSED=$(( END - START ))
 
+# Detect failure reliably: `ruse` returns exit 0 even when the srun/MPI it wraps
+# dies (it reports ITS OWN success), so a crash -- e.g. a rank OOM-killed during
+# "Initializing ccps and evaluators", which triggers a pmix teardown of all ranks
+# -- would otherwise fall through to a misleading "DONE wall=<tiny>s" and a bogus
+# timing.json (which would make AleRax look absurdly fast in the report). AleRax
+# writes model_parameters.txt only after a clean rate optimization; require it.
+MODELPARAMS="${OUTDIR%/}/model_parameters/model_parameters.txt"
+if [ ! -f "$MODELPARAMS" ]; then
+  echo "=== alerax FAILED: no model_parameters.txt ($MODELPARAMS). See the srun errors above. ==="
+  echo "    (common at scale: a rank OOM-killed while building a big family's DTL evaluator"
+  echo "     -> it exceeded --mem-per-cpu. Raise DEIGO_MEM_PER_CPU and resubmit.)"
+  exit 1
+fi
+
 # ---- Emit a machine-readable timing record --------------------------
 TIMING="${OUTDIR%/}/timing.json"
 # Use AleRax's ACTUAL post-trim family count (matches gpurec's kept count), not

@@ -37,20 +37,37 @@ SAION_PARTITION="${SAION_PARTITION:-largegpu}"
 SAION_GRES="${SAION_GRES:-gpu:a100:1}"   # if rejected, try: gpu:1
 SAION_CPUS="${SAION_CPUS:-8}"
 SAION_MEM="${SAION_MEM:-64G}"
-SAION_TIME="${SAION_TIME:-12:00:00}"     # largegpu wall cap is 12h
+SAION_TIME="${SAION_TIME:-2-00:00:00}"   # largegpu MaxTime=UNLIMITED (Default 8h); site policy ~7 days.
+                                         # 2 days = ample for the full Davin run. (An earlier 12h default
+                                         # self-inflicted a TIMEOUT on job 4649458 -- it was NOT a partition cap.)
 SAION_PYTHON_MODULE="${SAION_PYTHON_MODULE:-python/3.11.11}"
 
 # Deigo CPU partition for AleRax (MPI). compute = 4-day, 2000 cores/user.
 DEIGO_PARTITION="${DEIGO_PARTITION:-compute}"
 DEIGO_CONSTRAINT="${DEIGO_CONSTRAINT:-epyc}"   # AMD EPYC nodes (build + run)
-# AleRax MPI ranks. NOTE: AleRax parallelizes per-family and logs a "Recommended
-# maximum number of cores" (it was ~20 for the full Williams set, ~9 for the pilot)
-# -- beyond that, extra ranks idle (load balance was ~0.32, a few huge families
-# dominate). 64 over-provisions but ensures AleRax is never core-starved (so the
-# comparison can't be accused of under-resourcing it); set lower to be frugal.
-DEIGO_NTASKS="${DEIGO_NTASKS:-64}"
-DEIGO_MEM_PER_CPU="${DEIGO_MEM_PER_CPU:-4G}"
-DEIGO_TIME="${DEIGO_TIME:-1-00:00:00}"         # 1 day (raise for full set)
+# Phase-aware rank counts. AleRax parallelizes per-FAMILY (a family is atomic --
+# it can't be split across ranks), so its "Recommended maximum number of cores"
+# = total_clade_work / largest_single_family. That ceiling scales with the family
+# COUNT (the biggest family is fixed): the 200-family pilot recommended ~51; the
+# 5124-family full set should recommend ~1300. For a FAIR benchmark we size AleRax
+# AT that recommendation -- its fastest honest time, with no idle ranks beyond it.
+# Going past the recommendation does NOT help: a single family can't be split, so
+# the biggest family is a hard wall-clock floor and extra ranks just idle (which is
+# why we cap at ~the recommendation, not Deigo's 2000-core user limit). 1280 = 10x
+# 128-core nodes ~= the estimated ceiling. CONFIRM against the full job's own
+# "Recommended maximum number of cores" line (printed in its first ~3 min) and set
+# DEIGO_NTASKS_FULL to exactly that if it differs.
+DEIGO_NTASKS_PILOT="${DEIGO_NTASKS_PILOT:-64}"   # pilot: ~recommended 51 for 200 families
+DEIGO_NTASKS_FULL="${DEIGO_NTASKS_FULL:-1280}"   # full: == AleRax's ~1300 recommendation (10 nodes)
+# Explicit override used for BOTH phases when set (else 30_run_alerax picks per-phase).
+DEIGO_NTASKS="${DEIGO_NTASKS:-}"
+# Memory per rank. AleRax allocates a per-family DTL evaluator (~clades x species);
+# Davin's biggest families (up to ~1600 genes on 1007 species) need well over 4G,
+# so the full run OOM-killed a rank at 4G during evaluator init and pmix tore down
+# the whole job. 8G clears the biggest single family (the load balancer tends to
+# place it near-alone on its rank). Bump to 16G if a rank still OOMs at this phase.
+DEIGO_MEM_PER_CPU="${DEIGO_MEM_PER_CPU:-8G}"
+DEIGO_TIME="${DEIGO_TIME:-2-00:00:00}"         # 2 days (full Davin ~8h at 256 ranks; ample margin)
 # Module names vary across cluster updates -- override if `module avail`
 # shows different versions. These are loaded in the Deigo sbatch.
 # Pinned to what `module avail` showed on Deigo (your preflight): OpenMPI is
@@ -173,11 +190,17 @@ esac
 GPUREC_STEPS="${GPUREC_STEPS:-200}"
 GPUREC_DTYPE="${GPUREC_DTYPE:-float64}"
 GPUREC_MIN_SPECIES="${GPUREC_MIN_SPECIES:-4}"   # AleRax drops <4-species families
-GPUREC_FAMILY_BATCH_SIZE="${GPUREC_FAMILY_BATCH_SIZE:-0}"  # 0 = all families at once; raise for full set if OOM
-# Davin families are ~20x bigger; the un-batched forward over many big families
-# triggers a CUDA illegal access (gpurec's own fix was "batch the forward over
-# families"), so default Davin to a modest batch unless you set one.
-if [ "$DATASET" = davin ] && [ "$GPUREC_FAMILY_BATCH_SIZE" = 0 ]; then GPUREC_FAMILY_BATCH_SIZE=50; fi
+# Family batching for the gpurec forward/backward. Default 'auto': the driver
+# sizes the batch from the GPU's free memory and the loaded families' clade
+# counts (so it adapts to dataset scale -- Williams S=60 fits all at once;
+# Davin S=1007 with big families gets a memory-safe batch -- with no hand-tuned
+# guess). Set an int to force a fixed family count, or 0 for all-at-once.
+GPUREC_FAMILY_BATCH_SIZE="${GPUREC_FAMILY_BATCH_SIZE:-auto}"
+# auto-batch memory tuning (empty = driver defaults: mem_factor=2.0, mem_safety=0.55).
+# After a probe run reports its [mem-calib] 'suggested --mem-factor', set it here to
+# fill the GPU with bigger/fewer batches (lower factor = bigger batches).
+GPUREC_MEM_FACTOR="${GPUREC_MEM_FACTOR:-}"
+GPUREC_MEM_SAFETY="${GPUREC_MEM_SAFETY:-}"
 # Fraction-missing mode. 'e-only' matches AleRax (missing-data factor in the
 # extinction recursion ONLY) -- per docs/oliver-handoff.md ("Always use it").
 GPUREC_FM_MODE="${GPUREC_FM_MODE:-e-only}"

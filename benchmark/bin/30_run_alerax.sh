@@ -6,6 +6,17 @@ PHASE="${1:?usage: 30_run_alerax.sh pilot|full}"
 start_log "30_run_alerax_${PHASE}"
 case "$PHASE" in pilot) N="$PILOT_N";; full) N="$FULL_N";; *) die "phase must be pilot|full";; esac
 
+# Rank count: an explicit DEIGO_NTASKS overrides for both phases; otherwise pick
+# per-phase (full gets a bigger honest share -- AleRax's recommended cores scale
+# with family count). See config.sh.
+if [ -n "${DEIGO_NTASKS:-}" ]; then
+  NTASKS="$DEIGO_NTASKS"
+elif [ "$PHASE" = full ]; then
+  NTASKS="$DEIGO_NTASKS_FULL"
+else
+  NTASKS="$DEIGO_NTASKS_PILOT"
+fi
+
 TAG="$(run_tag "$PHASE" "$N")"
 FAM="$DEIGO_BENCH_DIR/families_${PHASE}.txt"
 SP="$DS_TREE_DEIGO"                 # rooted_phylogeny/<ROOT> (williams) or ReferenceTree.nwk (davin)
@@ -31,12 +42,12 @@ rsh "$DEIGO_SSH" "
 KIT="$(cd "$(dirname "$0")/.." && pwd)"
 push "$DEIGO_SSH" "$KIT/slurm/alerax_deigo.sbatch" "$DEIGO_BENCH_DIR/slurm"
 
-log "Submitting AleRax ($PHASE, mode=$MODE) on Deigo: $DEIGO_NTASKS ranks, part=$DEIGO_PARTITION"
+log "Submitting AleRax ($PHASE, mode=$MODE) on Deigo: $NTASKS ranks, part=$DEIGO_PARTITION"
 JOB=$(rsh "$DEIGO_SSH" "
   cd '$DEIGO_BENCH_DIR'
   sbatch --parsable \
     -p '$DEIGO_PARTITION' -C '$DEIGO_CONSTRAINT' \
-    -n '$DEIGO_NTASKS' --mem-per-cpu='$DEIGO_MEM_PER_CPU' -t '$DEIGO_TIME' \
+    -n '$NTASKS' --mem-per-cpu='$DEIGO_MEM_PER_CPU' -t '$DEIGO_TIME' \
     --export=ALL,ALERAX_DIR='$DEIGO_ALERAX_DIR',FAMILIES_FILE='$FAM',SP_TREE='$SP',OUTDIR='$OUTDIR',RUSE_OUT='$RUSE',REC_MODEL='$REC_MODEL',RATE_FLAG='$ALERAX_RATE_FLAG',MODULES='$DEIGO_MODULES',SEED='$SEED',FRACTION_MISSING='$FM' \
     '$DEIGO_BENCH_DIR/slurm/alerax_deigo.sbatch'
 ")

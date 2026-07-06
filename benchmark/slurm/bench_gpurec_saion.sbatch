@@ -28,7 +28,9 @@ set -euo pipefail
 : "${MIN_SPECIES:=4}"
 : "${FM_MODE:=e-only}"     # AleRax-matching fraction-missing mode (docs/oliver-handoff.md)
 : "${GMODE:=global}"       # global (one shared D,L,T) | specieswise (per-branch)
-: "${FAMILY_BATCH_SIZE:=0}"
+: "${FAMILY_BATCH_SIZE:=auto}"   # auto = driver sizes it from free GPU mem + family clade counts; or 0 (all) / int
+: "${MEM_FACTOR:=}"              # auto-batch: override --mem-factor (empty = driver default); set after a probe
+: "${MEM_SAFETY:=}"              # auto-batch: override --mem-safety (empty = driver default)
 : "${PY_MODULE:=python/3.11.11}"
 
 echo "=== bench_gpurec_saion.sbatch on $(hostname) at $(date) ==="
@@ -100,7 +102,10 @@ fi
 ARGS=( experiments/bench_gpurec_fit.py --mode "$GMODE" "${IN_ARGS[@]}"
        --families "$FAMILIES" --steps "$STEPS" --dtype "$DTYPE"
        --min-species "$MIN_SPECIES" --fm-mode "$FM_MODE"
-       --family-batch-size "$FAMILY_BATCH_SIZE" --out "$OUT_RATES" )
+       --family-batch-size "$FAMILY_BATCH_SIZE" )
+[ -n "$MEM_FACTOR" ] && ARGS+=( --mem-factor "$MEM_FACTOR" )
+[ -n "$MEM_SAFETY" ] && ARGS+=( --mem-safety "$MEM_SAFETY" )
+ARGS+=( --out "$OUT_RATES" )
 
 echo "=== CMD: $PY ${ARGS[*]} ==="
 START=$(date +%s)
