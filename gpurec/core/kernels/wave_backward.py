@@ -60,7 +60,7 @@ def _active_mask_from_rhs_absmax_kernel(
     DTYPE: tl.constexpr,
 ):
     w = tl.program_id(0)
-    row_base = w * stride
+    row_base = w.to(tl.int64) * stride
     row_max = tl.full([1], value=0.0, dtype=DTYPE)
 
     for s_start in range(0, S, BLOCK_S):
@@ -179,8 +179,8 @@ def _wave_backward_uniform_kernel(
     NEG_LARGE = tl.full([1], value=-1e30, dtype=DTYPE)
 
     w = tl.program_id(0)
-    pi_base = (ws + w) * stride      # offset into [C, S]
-    out_base = w * stride             # offset into [W, S]
+    pi_base = (ws + w).to(tl.int64) * stride      # offset into [C, S]
+    out_base = w.to(tl.int64) * stride             # offset into [W, S]
     if USE_ACTIVE_MASK:
         row_active = tl.load(active_mask_ptr + w)
         if row_active == 0:
@@ -889,7 +889,7 @@ def _dts_cross_backward_kernel(
     if USE_ACTIVE_MASK:
         parent_active = tl.load(active_mask_ptr + parent_w)
         if parent_active == 0:
-            out_base = i * S
+            out_base = i.to(tl.int64) * S
             zero_scalar = tl.zeros((1,), dtype=DTYPE)
             _scalar_off = tl.arange(0, 1)
             tl.store(param_pD_ptr + i + _scalar_off, zero_scalar)
@@ -914,16 +914,16 @@ def _dts_cross_backward_kernel(
         log_pS = log_pS_arg
 
     # Base offsets into [C, S] for child clades
-    pi_l_base = sl * stride_C
-    pi_r_base = sr * stride_C
-    pibar_l_base = sl * stride_C
-    pibar_r_base = sr * stride_C
+    pi_l_base = sl.to(tl.int64) * stride_C
+    pi_r_base = sr.to(tl.int64) * stride_C
+    pibar_l_base = sl.to(tl.int64) * stride_C
+    pibar_r_base = sr.to(tl.int64) * stride_C
     # Parent clade in Pi_star: row (ws + parent_w)
-    parent_pi_base = (ws + parent_w) * stride_C
+    parent_pi_base = (ws + parent_w).to(tl.int64) * stride_C
     # v_k is [W, S] contiguous, indexed by parent_w
-    parent_vk_base = parent_w * S
+    parent_vk_base = parent_w.to(tl.int64) * S
     # Output row
-    out_base = i * S
+    out_base = i.to(tl.int64) * S
 
     # Accumulators for per-split param sums (1-element blocks for Triton compatibility)
     sum_pD = tl.zeros((1,), dtype=DTYPE)
@@ -1191,9 +1191,9 @@ def _dts_cross_backward_accum_kernel(
     if USE_ACTIVE_MASK:
         parent_active = tl.load(active_mask_ptr + parent_w)
         if parent_active == 0:
-            out_base = i * S
-            ud_l_base = i * S
-            ud_r_base = (tl.program_id(0) + 0 + tl.num_programs(0)) * S
+            out_base = i.to(tl.int64) * S
+            ud_l_base = i.to(tl.int64) * S
+            ud_r_base = (tl.program_id(0) + 0 + tl.num_programs(0)).to(tl.int64) * S
             zero_scalar = tl.zeros((1,), dtype=DTYPE)
             _scalar_off = tl.arange(0, 1)
             if not ACCUM_PARAM_REDUCTIONS:
@@ -1223,13 +1223,13 @@ def _dts_cross_backward_accum_kernel(
         log_pD = log_pD_arg
         log_pS = log_pS_arg
 
-    pi_l_base = sl * stride_C
-    pi_r_base = sr * stride_C
-    pibar_l_base = sl * stride_C
-    pibar_r_base = sr * stride_C
-    parent_pi_base = (ws + parent_w) * stride_C
-    parent_vk_base = parent_w * S
-    out_base = i * S
+    pi_l_base = sl.to(tl.int64) * stride_C
+    pi_r_base = sr.to(tl.int64) * stride_C
+    pibar_l_base = sl.to(tl.int64) * stride_C
+    pibar_r_base = sr.to(tl.int64) * stride_C
+    parent_pi_base = (ws + parent_w).to(tl.int64) * stride_C
+    parent_vk_base = parent_w.to(tl.int64) * S
+    out_base = i.to(tl.int64) * S
 
     sum_pD = tl.zeros((1,), dtype=DTYPE)
     sum_pS = tl.zeros((1,), dtype=DTYPE)
@@ -1636,7 +1636,7 @@ def _pibar_row_stats_kernel(
 
     row_max = tl.full([1], value=NEG_LARGE, dtype=DTYPE)
     row_sum = tl.full([1], value=0.0, dtype=DTYPE)
-    pi_base = row * stride_C
+    pi_base = row.to(tl.int64) * stride_C
     for s_start in range(0, S, BLOCK_S):
         s_offs = s_start + tl.arange(0, BLOCK_S)
         mask = s_offs < S
@@ -1724,9 +1724,9 @@ def _uniform_cross_pibar_vjp_kernel(
     else:
         row_active = True
 
-    pi_base = child * stride_C
-    grad_base = split_i * S
-    corr_base = row * S
+    pi_base = child.to(tl.int64) * stride_C
+    grad_base = split_i.to(tl.int64) * S
+    corr_base = row.to(tl.int64) * S
 
     # Clear the correction row owned by this program.
     for s_start in range(0, S, BLOCK_S):
@@ -1884,7 +1884,7 @@ def _group_cross_pibar_grad_kernel(
 
     s_offs = block * BLOCK_S + tl.arange(0, BLOCK_S)
     mask = s_offs < S
-    grad_base = split_i * S
+    grad_base = split_i.to(tl.int64) * S
     grad_l = tl.load(grad_Pibar_l_ptr + grad_base + s_offs, mask=mask, other=0.0)
     grad_r = tl.load(grad_Pibar_r_ptr + grad_base + s_offs, mask=mask, other=0.0)
     grad = tl.where(is_right, grad_r, grad_l)
@@ -1923,9 +1923,9 @@ def _uniform_cross_pibar_vjp_tree_grouped_kernel(
             return
 
     child = tl.load(group_children_ptr + row)
-    pi_base = child * stride_C
-    grad_base = row * S
-    subtree_base = row * S
+    pi_base = child.to(tl.int64) * stride_C
+    grad_base = row.to(tl.int64) * S
+    subtree_base = row.to(tl.int64) * S
 
     row_max = tl.full([1], value=NEG_LARGE, dtype=DTYPE)
     row_sum = tl.full([1], value=0.0, dtype=DTYPE)
@@ -2051,9 +2051,9 @@ def _uniform_cross_pibar_vjp_tree_kernel(
     else:
         row_active = True
 
-    pi_base = child * stride_C
-    grad_base = split_i * S
-    subtree_base = row * S
+    pi_base = child.to(tl.int64) * stride_C
+    grad_base = split_i.to(tl.int64) * S
+    subtree_base = row.to(tl.int64) * S
 
     if USE_PIBAR_DENOM_STATS:
         row_max = tl.load(pibar_row_max_ptr + child)
@@ -2197,9 +2197,9 @@ def _uniform_cross_pibar_vjp_tree_prefix_kernel(
     else:
         row_active = True
 
-    pi_base = child * stride_C
-    grad_base = split_i * S
-    row_base = row * S
+    pi_base = child.to(tl.int64) * stride_C
+    grad_base = split_i.to(tl.int64) * S
+    row_base = row.to(tl.int64) * S
 
     if USE_ROW_STATS:
         row_max = tl.load(row_max_ptr + child)
@@ -2395,8 +2395,8 @@ def _uniform_cross_pibar_vjp_tree_from_ud_kernel(
     else:
         row_active = True
 
-    pi_base = child * stride_C
-    row_base = row * S
+    pi_base = child.to(tl.int64) * stride_C
+    row_base = row.to(tl.int64) * S
     row_max = tl.load(pibar_row_max_ptr + child).to(DTYPE)
     A = tl.load(pibar_A_ptr + row).to(DTYPE)
 
@@ -2647,8 +2647,8 @@ def _uniform_cross_pibar_vjp_grouped_tree_kernel(
 
     row = tl.program_id(0)
     child = tl.load(child_ids_ptr + row)
-    pi_base = child * stride_C
-    row_base = row * S
+    pi_base = child.to(tl.int64) * stride_C
+    row_base = row.to(tl.int64) * S
 
     if USE_ROW_STATS:
         row_max = tl.load(row_max_ptr + child)

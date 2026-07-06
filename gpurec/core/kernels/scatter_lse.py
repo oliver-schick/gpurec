@@ -45,7 +45,7 @@ def _seg_lse_hdim_kernel(
     x: [H, S]
     y: [G, S]
     """
-    gid = tl.program_id(0)  # segment id along H
+    gid = tl.program_id(0).to(tl.int64)  # segment id along H
     sid = tl.program_id(1)  # tile id along S
     if gid >= G:
         return
@@ -67,7 +67,7 @@ def _seg_lse_hdim_kernel(
     # Sweep H within the segment
     start_h = h0
     while start_h < h1:
-        offs_h = start_h + tl.arange(0, BLOCK_H)
+        offs_h = (start_h + tl.arange(0, BLOCK_H)).to(tl.int64)
         mask_h = offs_h < h1
 
         mask = mask_h[:, None] & mask_s[None, :]
@@ -134,7 +134,7 @@ def _seg_lse_hdim_bwd_kernel(
       - Accumulate the denominator in higher precision (ACC_DTYPE) to reduce loss.
       - Merge blocks with running-max trick while keeping shift consistency.
     """
-    gid = tl.program_id(0)  # segment id
+    gid = tl.program_id(0).to(tl.int64)  # segment id
     sid = tl.program_id(1)  # S tile id
     if gid >= G:
         return
@@ -174,7 +174,7 @@ def _seg_lse_hdim_bwd_kernel(
     # ---------------------------
     start_h = h0
     while start_h < h1:
-        offs_h = start_h + tl.arange(0, BLOCK_H)
+        offs_h = (start_h + tl.arange(0, BLOCK_H)).to(tl.int64)
         mask_h = offs_h < h1
         mask = mask_h[:, None] & mask_s[None, :]
 
@@ -228,7 +228,7 @@ def _seg_lse_hdim_bwd_kernel(
     # ---------------------------
     start_h = h0
     while start_h < h1:
-        offs_h = start_h + tl.arange(0, BLOCK_H)
+        offs_h = (start_h + tl.arange(0, BLOCK_H)).to(tl.int64)
         mask_h = offs_h < h1
         mask = mask_h[:, None] & mask_s[None, :]
 

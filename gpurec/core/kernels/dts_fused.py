@@ -55,14 +55,18 @@ def _dts_fused_kernel(
         parent_w = tl.load(reduce_idx_ptr + n)
         parent_active = tl.load(active_mask_ptr + parent_w)
         if parent_active == 0:
-            out_base = n * S
+            out_base = n.to(tl.int64) * S
             tl.store(out_ptr + out_base + s_offs,
                      tl.full([BLOCK_S], value=-1e30, dtype=DTYPE),
                      mask=mask)
             return
 
-    base_l = left_idx * S
-    base_r = right_idx * S
+    # int64 offsets: clade/split indices are stored int32 (bandwidth), but the
+    # flattened address idx*S into [C,S]/[N,S] overflows int32 once C*S or N*S
+    # exceeds 2^31 (e.g. Davin S=2013 with ~1M-clade batches). Promote only the
+    # multiply; s_offs (int32) then promotes to int64 in the add.
+    base_l = left_idx.to(tl.int64) * S
+    base_r = right_idx.to(tl.int64) * S
 
     # Load Pi/Pibar for left and right children directly from [C, S] tensors
     pi_l = tl.load(Pi_ptr + base_l + s_offs, mask=mask, other=-1e30)
@@ -75,14 +79,14 @@ def _dts_fused_kernel(
     if mode_pD == 2:
         log_pD_s = tl.load(log_pD_ptr + n)
     elif mode_pD == 1:
-        log_pD_s = tl.load(log_pD_ptr + n * S + s_offs, mask=mask, other=-1e30)
+        log_pD_s = tl.load(log_pD_ptr + n.to(tl.int64) * S + s_offs, mask=mask, other=-1e30)
     else:
         log_pD_s = tl.load(log_pD_ptr + s_offs, mask=mask, other=-1e30)
 
     if mode_pS == 2:
         log_pS_s = tl.load(log_pS_ptr + n)
     elif mode_pS == 1:
-        log_pS_s = tl.load(log_pS_ptr + n * S + s_offs, mask=mask, other=-1e30)
+        log_pS_s = tl.load(log_pS_ptr + n.to(tl.int64) * S + s_offs, mask=mask, other=-1e30)
     else:
         log_pS_s = tl.load(log_pS_ptr + s_offs, mask=mask, other=-1e30)
 
@@ -121,7 +125,7 @@ def _dts_fused_kernel(
     lsp = tl.load(log_split_probs_ptr + n)
     result = tl.log2(s) + m + lsp
 
-    out_base = n * S
+    out_base = n.to(tl.int64) * S
     tl.store(out_ptr + out_base + s_offs, result, mask=mask)
 
 

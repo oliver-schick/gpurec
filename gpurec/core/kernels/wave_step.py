@@ -46,7 +46,7 @@ def _wave_pibar_step_kernel(
     DTYPE = tl.float64 if FP64 else tl.float32
     NEG_LARGE = -1e300 if FP64 else -1e30
 
-    w = tl.program_id(0)
+    w = tl.program_id(0).to(tl.int64)
     s_block = tl.program_id(1)
 
     s_offs = s_block * BLOCK_S + tl.arange(0, BLOCK_S)
@@ -198,7 +198,7 @@ def _wave_step_kernel(
     stride_c: tl.constexpr = 0,
 ):
     """Fused kernel: given Pi_W, Pibar_W, compute Pi_new = logsumexp2(all_terms, dim=0)."""
-    w = tl.program_id(0)
+    w = tl.program_id(0).to(tl.int64)
     s_block = tl.program_id(1)
     BLOCK_S: tl.constexpr = 32
 
@@ -334,8 +334,11 @@ def _wave_step_uniform_kernel(
     DTYPE = tl.float64 if FP64 else tl.float32
     NEG_LARGE = -1e300 if FP64 else -1e30
 
-    w = tl.program_id(0)
-    pi_base = (ws + w) * stride      # offset into global Pi/Pibar
+    w = tl.program_id(0).to(tl.int64)
+    # int64: (ws+w) is a GLOBAL clade index (up to C), so (ws+w)*S overflows int32
+    # once C*S > 2^31 (Davin S=2013, ~1M-clade batches). Promote at the multiply;
+    # index tensors stay int32. The [W,S] out_base (w<W, one wave) can't overflow.
+    pi_base = (ws + w).to(tl.int64) * stride    # offset into global Pi/Pibar
     if OUTPUT_GLOBAL:
         out_base = pi_base            # offset into global output rows
     else:
@@ -389,7 +392,7 @@ def _wave_step_uniform_kernel(
             # This avoids the loop-carried dependency of following parent
             # pointers, at the cost of one extra static index tensor.
             for k in range(0, MAX_ANCESTOR_DEPTH):
-                anc = tl.load(ancestor_cols_ptr + k * S + s_offs, mask=mask, other=-1)
+                anc = tl.load(ancestor_cols_ptr + k.to(tl.int64) * S + s_offs, mask=mask, other=-1)
                 anc_valid = mask & (anc >= 0) & (anc < S)
                 pi_anc = tl.load(Pi_ptr + pi_base + anc, mask=anc_valid, other=NEG_LARGE)
                 ancestor_sum += tl.where(anc_valid, tl.exp2(pi_anc - row_max), tl.zeros([BLOCK_S], dtype=DTYPE))
@@ -736,7 +739,7 @@ def _wave_pibar_uniform_parent_kernel(
     DTYPE = tl.float64 if FP64 else tl.float32
     NEG_LARGE = -1e300 if FP64 else -1e30
 
-    w = tl.program_id(0)
+    w = tl.program_id(0).to(tl.int64)
     pi_base = (ws + w) * stride
 
     row_max = tl.full([1], value=NEG_LARGE, dtype=DTYPE)
@@ -821,7 +824,7 @@ def _wave_step_uniform_from_pibar_kernel(
     NEG_LARGE = -1e300 if FP64 else -1e30
     M_SAFE_THRESH = -1e299 if FP64 else -1e29
 
-    w = tl.program_id(0)
+    w = tl.program_id(0).to(tl.int64)
     pi_base = (ws + w) * stride
     out_base = w * stride
 
@@ -1048,7 +1051,7 @@ def _wave_step_uniform_linear_kernel(
     NEG_LARGE = -1e300 if FP64 else -1e30
     M_SAFE_THRESH = -1e299 if FP64 else -1e29
 
-    w = tl.program_id(0)
+    w = tl.program_id(0).to(tl.int64)
     pi_base = (ws + w) * stride
     out_base = w * stride
 
@@ -1073,8 +1076,8 @@ def _wave_step_uniform_linear_kernel(
 
         raw = tl.load(v_scaled_ptr + s_offs, mask=mask, other=0.0) * row_sum
         for k in range(0, MAX_OP_NNZ):
-            cols = tl.load(op_cols_ptr + k * S + s_offs, mask=mask, other=0)
-            vals = tl.load(op_vals_ptr + k * S + s_offs, mask=mask, other=0.0)
+            cols = tl.load(op_cols_ptr + k.to(tl.int64) * S + s_offs, mask=mask, other=0)
+            vals = tl.load(op_vals_ptr + k.to(tl.int64) * S + s_offs, mask=mask, other=0.0)
             pi_col = tl.load(Pi_ptr + pi_base + cols, mask=mask, other=NEG_LARGE)
             raw += vals * tl.exp2(pi_col - row_max)
 
@@ -1160,7 +1163,7 @@ def _wave_pibar_uniform_ancestor_kernel(
     DTYPE = tl.float64 if FP64 else tl.float32
     NEG_LARGE = -1e300 if FP64 else -1e30
 
-    w = tl.program_id(0)
+    w = tl.program_id(0).to(tl.int64)
     pi_base = (ws + w) * stride
 
     row_max = tl.full([1], value=NEG_LARGE, dtype=DTYPE)
@@ -1183,7 +1186,7 @@ def _wave_pibar_uniform_ancestor_kernel(
 
         ancestor_sum = tl.zeros([BLOCK_S], dtype=DTYPE)
         for k in range(0, MAX_ANCESTOR_DEPTH):
-            anc = tl.load(ancestor_cols_ptr + k * S + s_offs, mask=mask, other=-1)
+            anc = tl.load(ancestor_cols_ptr + k.to(tl.int64) * S + s_offs, mask=mask, other=-1)
             anc_valid = mask & (anc >= 0) & (anc < S)
             pi_anc = tl.load(Pi_ptr + pi_base + anc, mask=anc_valid, other=NEG_LARGE)
             ancestor_sum += tl.where(anc_valid, tl.exp2(pi_anc - row_max), tl.zeros([BLOCK_S], dtype=DTYPE))
