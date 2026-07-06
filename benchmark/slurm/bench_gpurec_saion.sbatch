@@ -44,6 +44,13 @@ cd "$GPUREC_DIR"
 export TORCH_EXTENSIONS_DIR="$GPUREC_DIR/.torch_ext"
 [ -d ".venv/bin" ] && export PATH="$GPUREC_DIR/.venv/bin:$PATH"   # ninja on PATH if a rebuild is ever needed
 
+# Triton caches JIT-compiled kernels. The default ~/.triton on OIST's NETWORK home
+# filesystem hits I/O errors / stale-file-handle races -- a long full run compiles
+# many kernel variants and one cache write can fail with OSError [Errno 5] (this
+# killed job 4655190 at 58 min). Point it at fast NODE-LOCAL scratch, per job.
+export TRITON_CACHE_DIR="${TMPDIR:-/tmp}/triton_cache_${SLURM_JOB_ID:-$$}"
+mkdir -p "$TRITON_CACHE_DIR" && echo "=== TRITON_CACHE_DIR=$TRITON_CACHE_DIR (node-local) ==="
+
 # Admin recommendation: use the env module python, not the system one.
 module load "$PY_MODULE" 2>/dev/null || echo "WARN: module load $PY_MODULE failed"
 # Best-effort: ensure a recent libstdc++ for the gcc-built preprocess_cpp.so
