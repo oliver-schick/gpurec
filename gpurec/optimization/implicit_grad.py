@@ -57,6 +57,7 @@ def implicit_grad_loglik_vjp_wave(
     cg_tol: float = 1e-8,
     cg_maxiter: int = 500,
     gmres_restart: int = 40,
+    cg_x0: Optional[torch.Tensor] = None,
     pibar_mode: str = 'uniform',
     transfer_mat: Optional[torch.Tensor] = None,
     transfer_mat_unnormalized: Optional[torch.Tensor] = None,
@@ -133,6 +134,7 @@ def implicit_grad_loglik_vjp_wave(
         theta, unnorm_row_max, specieswise,
         device, dtype,
         cg_tol=cg_tol, cg_maxiter=cg_maxiter, gmres_restart=gmres_restart,
+        cg_x0=cg_x0,
         pibar_mode=pibar_mode, transfer_mat=transfer_mat,
         transfer_mat_unnormalized=transfer_mat_unnormalized,
         ancestors_T=ancestors_T,
@@ -159,6 +161,7 @@ def _e_adjoint_and_theta_vjp(
     *,
     genewise=False,
     cg_tol=1e-8, cg_maxiter=500, gmres_restart=40,
+    cg_x0=None,
     pibar_mode='uniform',
     transfer_mat=None, transfer_mat_unnormalized=None, ancestors_T=None,
     leaf_E=None,
@@ -282,13 +285,23 @@ def _e_adjoint_and_theta_vjp(
         gE, = vjpG(wE.clone())
         return (wE - gE).reshape(-1)
 
-    w_flat, statsG, okG = _cg(AG_flat, q_flat, tol=cg_tol, maxiter=cg_maxiter)
+    # Warm-start CG from the previous optimizer step's adjoint (same operator,
+    # slowly-varying RHS => far fewer iterations). x0 must match q_flat's shape;
+    # a stale/mismatched x0 is ignored so this can never change the SOLUTION, only
+    # the iteration count (CG converges to the unique solution from any start).
+    _x0 = None
+    if cg_x0 is not None and cg_x0.shape == q_flat.shape and cg_x0.dtype == q_flat.dtype:
+        _x0 = cg_x0
+    w_flat, statsG, okG = _cg(AG_flat, q_flat, tol=cg_tol, maxiter=cg_maxiter, x0=_x0)
     if not okG:
         w_flat, statsG = _gmres(AG_flat, q_flat, tol=cg_tol, restart=gmres_restart, maxiter=cg_maxiter)
         statsG.fallback_used = True
 
     torch.cuda.synchronize()
     _t_cg = time.perf_counter() - _t_qE
+
+    # Expose the converged adjoint so the optimizer can warm-start the next step.
+    statsG.adjoint_w = w_flat.detach()
 
     wE = w_flat.view(E_shape)
 

@@ -69,6 +69,7 @@ def optimize_theta_wave(
     cg_tol: float = 1e-8,
     cg_maxiter: int = 500,
     gmres_restart: int = 40,
+    cg_warm_start: bool = True,
     specieswise: bool = False,
     device=None,
     dtype=torch.float64,
@@ -730,6 +731,12 @@ def optimize_theta_wave(
         _ddp.all_reduce_sum_(_nllt)
         return float(_nllt.item())
 
+    # Per-batch warm-start for the E-adjoint CG solve. Each batch solves the SAME
+    # operator (I - G_E^T) with its own slowly-varying RHS, so seeding CG with that
+    # batch's converged adjoint from the previous step cuts its iteration count. Keyed
+    # by global batch id; only ever changes CG's iteration count, never the solution.
+    _cg_warm = {}
+
     def _forward_backward(theta_d, warm_E, selected_batch_ids=None, omega_d=None):
         """Full forward + backward.
 
@@ -749,16 +756,20 @@ def optimize_theta_wave(
         if wave_layout_batches is not None:
             if selected_batch_ids is None:
                 layout_batches = wave_layout_batches
+                _batch_gids = list(range(len(wave_layout_batches)))
             else:
                 layout_batches = [wave_layout_batches[i] for i in selected_batch_ids]
+                _batch_gids = list(selected_batch_ids)
         elif _lazy_batch_builder is not None and _lazy_batch_ranges is not None:
             if selected_batch_ids is None:
                 ids = range(len(_lazy_batch_ranges))
             else:
                 ids = selected_batch_ids
+            _batch_gids = list(ids)
             layout_batches = (_lazy_batch_builder(i) for i in ids)
         else:
             layout_batches = [(wave_layout, root_clade_ids)]
+            _batch_gids = [0]
 
         torch.cuda.synchronize()
         t_e0 = time.perf_counter()
@@ -844,6 +855,8 @@ def optimize_theta_wave(
                 pi_phase_time += time.perf_counter() - t_pi_b0
 
                 t_g_b0 = time.perf_counter()
+                _gid = _batch_gids[_batch_idx]
+                _cg_x0 = _cg_warm.get(_gid) if cg_warm_start else None
                 try:
                     grad_theta_b, statsG_b = implicit_grad_loglik_vjp_wave(
                         wl_b, species_helpers,
@@ -863,6 +876,7 @@ def optimize_theta_wave(
                         pruning_threshold=pruning_threshold,
                         cg_tol=cg_tol, cg_maxiter=cg_maxiter,
                         gmres_restart=gmres_restart,
+                        cg_x0=_cg_x0,
                         pibar_mode=pibar_mode,
                         transfer_mat=transfer_mat,
                         transfer_mat_unnormalized=transfer_mat_unnormalized,
@@ -888,6 +902,10 @@ def optimize_theta_wave(
                 grad_phase_time += time.perf_counter() - t_g_b0
 
                 grad_theta = grad_theta + grad_theta_b
+                if cg_warm_start:
+                    _aw = getattr(statsG_b, 'adjoint_w', None)
+                    if _aw is not None:
+                        _cg_warm[_gid] = _aw
                 stats_list.append(statsG_b)
                 pi_bwd_t_total += float(getattr(statsG_b, 'pi_bwd_time', 0.0))
                 cg_t_total += float(getattr(statsG_b, 'cg_time', 0.0))
