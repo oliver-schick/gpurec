@@ -23,32 +23,21 @@ from run_williams_branchwise import (  # noqa: E402  (same helpers the validated
 )
 
 
-# --- auto-batch memory model + self-calibrating cache --------------------------
-# A batch's peak memory scales with its total clade count: peak ~= bytes_per_clade
-# * sum(C), where bytes_per_clade = K * S * elt and K = the number of live [.,S]
-# buffers at the BACKWARD peak (implicit-grad + CG -- the true peak, larger than the
-# forward). K is a property of the ALGORITHM (mode/dtype/pibar_mode), ~independent of
-# which families are fed, so it transfers across datasets. We cache K per-config: the
-# first run of a config uses the seed below and writes back the measured K; every
-# later run of that config sizes the first batch optimally ("best batch after the
-# first run"). An OOM (now a clean, catchable error thanks to the int64 offsets)
-# triggers an automatic shrink-and-retry, so a bad guess costs a retry, not a job.
-_MEM_TARGET_FRAC = 0.80          # aim the realized TRANSIENT peak at this fraction of free memory.
-                                 # Aggressive on purpose: an over-shoot is now a CLEAN, catchable
-                                 # OOM (int64 fix) that the retry loop below shrinks and re-runs, so
-                                 # we chase big/fast batches and let the backstop catch the rare miss
-                                 # -- rather than permanently shrinking batches (slower) out of caution.
-_DEFAULT_K = 12.0                # seed for an unmeasured config: intentionally > the small-batch measured
-                                 # K (~6 at 240k clades). Per-clade memory RISES with batch size because
-                                 # FFD packs the densest families (most splits/clade -> the [N_splits,S]
-                                 # backward buffer) into the biggest batch, so a K measured at a sub-max
-                                 # batch under-predicts the peak. 12 keeps the first (seeded) batch safe.
-_K_SAFETY = 1.8                  # inflate a CACHED K on use. Per-clade memory is SUPER-linear here (measured
-                                 # ~97k B/clade at a 350k batch -> 32 GiB, but ~137k at 481k -> 66 GiB), because
-                                 # bigger batches pull in denser families (more splits/clade -> [N_splits,S]).
-                                 # So a K measured at one size under-predicts a larger one; 1.8 keeps the next
-                                 # batch in the proven-safe ~390k zone (cached K=6 -> eff 10.8 -> ~42 GiB). The
-                                 # OOM-shrink-retry loop catches any residual miss.
+# --- GPU-memory model + self-calibrating cache (clades-linear) -----------------
+# gpurec caps every wave at max_wave_size clades (split_phase_waves) and processes one
+# wave at a time, so the per-wave DTS/[W,S] transient is BOUNDED -- it does NOT grow with
+# batch size. The only term that grows is the persistent clade tensors Pi/Pibar/adjoint
+# [C,S]. So the peak is LINEAR IN CLADES:  peak ~= resident + bytes_per_clade * sum(C).
+# (Splits enter only via the bounded transient, so a split term is unnecessary -- verified
+# this session: the fused DTS is per-wave, no full [N,S] buffer exists.) bytes_per_clade
+# lumps in the bounded transient and is CONSERVATIVE (we cache the MAX observed, so we
+# never under-predict); the residual noise is allocator fragmentation, which no structural
+# model predicts -> the OOM-shrink-retry backstop (catchable OOM thanks to int64) covers it.
+_MEM_TARGET_FRAC = 0.80          # aim peak (resident + clades*bytes_per_clade) at this fraction of free mem
+_SEED_BYTES_PER_CLADE = 105_000  # cold-start seed; both completed Davin full runs measured 97-100k B/clade,
+                                 # so this is a tight-but-safe margin (resident is separately hardened below).
+                                 # Self-calibrates upward to the max observed, and the OOM backstop covers spikes.
+_RESIDENT_SEED_GIB = 6.0         # fixed overhead (full layout + helpers) assumed until measured
 _CALIB_PATH = os.environ.get(
     "GPUREC_MEMBATCH_CALIB",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), ".membatch_calib.json"))
@@ -58,51 +47,48 @@ def _calib_key(mode, dtype_str, pibar):
     return f"{mode}|{dtype_str}|{pibar}"
 
 
-def _load_calib_K(key):
+def _load_calib(key):
     try:
         with open(_CALIB_PATH) as fh:
-            return float(json.load(fh)[key]["K"])
+            return json.load(fh).get(key)
     except Exception:
         return None
 
 
-def _save_calib_K(key, K, extra):
+def _save_calib(key, entry):
     try:
         d = {}
         if os.path.exists(_CALIB_PATH):
             with open(_CALIB_PATH) as fh:
                 d = json.load(fh)
-        d[key] = {"K": round(float(K), 3), **extra}
+        d[key] = entry
         with open(_CALIB_PATH, "w") as fh:
             json.dump(d, fh, indent=2)
-        print(f"      [auto-batch] cached K={K:.2f} for '{key}' -> {_CALIB_PATH}", flush=True)
+        print(f"      [auto-batch] cached bytes_per_clade={entry.get('bytes_per_clade'):,.0f} "
+              f"resident={entry.get('resident_gib')}GiB for '{key}' -> {_CALIB_PATH}", flush=True)
     except Exception as e:
         print(f"      [auto-batch] warn: could not update calib cache: {e}", flush=True)
 
 
 def _pack_batches(families, clade_budget):
-    """First-fit-decreasing pack of families into VARIABLE-size batches, each with
-    sum(C) <= clade_budget. Small families pack together; a family larger than the
-    whole budget gets its own solo batch (keeping the others <= budget). Correctness
-    is partition-independent (the optimizer sums per-family gradients). Returns
-    (groups, meta): groups = list of family-index lists."""
+    """First-fit-decreasing pack of families into variable-size batches, each with
+    sum(C) <= clade_budget (clades). Small families pack together; a family larger than
+    the budget gets its own solo batch. Correctness is partition-independent (the
+    optimizer sums per-family gradients). Returns (groups, meta)."""
     Cs = [int(f["C"]) for f in families]
-    C_max = max(Cs)
     order = sorted(range(len(families)), key=lambda i: Cs[i], reverse=True)
-    batches = []                                                # each: [indices, total_C]
+    batches = []                                         # each: [idxs, sumC]
     for i in order:
-        c = Cs[i]
         for b in batches:
-            if b[1] + c <= clade_budget:
-                b[0].append(i); b[1] += c; break
+            if b[1] + Cs[i] <= clade_budget:
+                b[0].append(i); b[1] += Cs[i]; break
         else:
-            batches.append([[i], float(c)])
+            batches.append([[i], Cs[i]])
     groups = [b[0] for b in batches]
     sizes = [len(g) for g in groups]
-    csums = [b[1] for b in batches]
     meta = {"n_batches": len(groups), "clade_budget": clade_budget,
-            "max_batch_clades": max(csums), "C_max": C_max,
-            "min_families_per_batch": min(sizes), "max_families_per_batch": max(sizes)}
+            "max_batch_clades": max(b[1] for b in batches), "C_max": max(Cs),
+            "families_per_batch": [min(sizes), max(sizes)]}
     return groups, meta
 
 
@@ -130,8 +116,8 @@ def main(argv=None) -> int:
                     help="auto-batch: fraction of free GPU memory to budget when --mem-factor is manual")
     ap.add_argument("--mem-factor", default="auto",
                     help="auto-batch: 'auto' (self-calibrating -- size the batch from a cached/seeded "
-                         "per-clade memory estimate and refine it each run) or a float (manual: peak "
-                         "[clades,S] buffers held at once; higher = smaller, safer batches).")
+                         "bytes-per-clade estimate, refined to the max observed each run) or a float "
+                         "(manual: peak [clades,S] buffers held at once; higher = smaller, safer batches).")
     ap.add_argument("--mem-retries", type=int, default=4,
                     help="auto-batch: on CUDA OOM, shrink the batch ~30%% and retry, up to N times")
     ap.add_argument("--out", required=True)
@@ -231,29 +217,45 @@ def main(argv=None) -> int:
             device=device, dtype=dtype, leaf_E=leaf_E, leaf_obs_log=leaf_obs_log, verbose=True)
         return r, _resident, time.time() - _t
 
-    # --- Resolve batching + run. 'auto' self-calibrates: pick clade_budget from a
-    # cached/seeded K, and on OOM shrink 40% and retry (int64 made OOM catchable). ---
+    # --- Resolve batching + run. 'auto' packs families into variable clade-budget
+    # batches: the peak is clades-linear (bounded per-wave transient), so ONE conservative
+    # bytes-per-clade coefficient sizes the budget. Cached from the max observed so it never
+    # under-predicts; OOM (catchable via int64) shrinks the budget and retries. ---
     calib_key = _calib_key(args.mode, args.dtype, "uniform")
+    cal = _load_calib(calib_key) or {}
+    # resident = fixed overhead held across the optimize loop. The cache key is
+    # dataset-agnostic (mode|dtype|pibar), so a prior PILOT run can leave a tiny
+    # resident_gib here that would inflate the budget for a full run -> under-reserve
+    # -> OOM risk. Guard with the ACTUAL current allocation (the full wave_layout +
+    # helpers are already on the GPU at this point, so _memnow() is a real, correct
+    # lower bound) and the seed floor. Take the max so we never under-reserve.
+    resident_seed = max(float(_memnow()),
+                        float(cal.get("resident_gib", _RESIDENT_SEED_GIB)) * 2**30,
+                        _RESIDENT_SEED_GIB * 2**30)
+    bytes_per_clade = float(cal.get("bytes_per_clade", _SEED_BYTES_PER_CLADE))
+
     batch_meta = None; family_batch_size = 0
     result = None; resident = 0; elapsed = 0.0
     if fbs_raw == "auto":
-        if mem_factor_val is not None:                       # manual factor (back-compat)
-            clade_budget = args.mem_safety * free_bytes / (S * elt * mem_factor_val)
-            K_src = f"manual mem_factor={mem_factor_val:g}"
-        else:                                                # cached (or seeded) K
-            _cK = _load_calib_K(calib_key)
-            _K0 = (_cK * _K_SAFETY) if _cK is not None else _DEFAULT_K
-            K_src = (f"cached K={_cK:.2f}x{_K_SAFETY}={_K0:.2f}" if _cK is not None
-                     else f"seed K={_K0:.2f} (config not yet calibrated)")
-            clade_budget = _MEM_TARGET_FRAC * free_bytes / (_K0 * S * elt)
+        if mem_factor_val is not None:                       # manual override: buffers/clade
+            bytes_per_clade = float(mem_factor_val) * S * elt
+            budget_bytes = max(1.0, args.mem_safety * free_bytes)
+            model_src = f"manual mem_factor={mem_factor_val:g} -> {bytes_per_clade:,.0f} B/clade"
+        else:
+            budget_bytes = max(1.0, _MEM_TARGET_FRAC * free_bytes - resident_seed)
+            src = "cached" if "bytes_per_clade" in cal else "seed"
+            model_src = f"{src} {bytes_per_clade:,.0f} B/clade (resident~{_gib(resident_seed):.1f}GiB)"
         wlb = None
         for attempt in range(max(1, args.mem_retries)):
+            clade_budget = max(1, int(budget_bytes / bytes_per_clade))
             batch_groups, batch_meta = _pack_batches(families, clade_budget)
-            print(f"      [auto-batch] try {attempt+1}/{args.mem_retries}: {K_src}  "
-                  f"free={_gib(free_bytes):.1f}GiB target~{_MEM_TARGET_FRAC:.0%}  "
-                  f"clade_budget={clade_budget:,.0f} -> {batch_meta['n_batches']} batches | "
-                  f"fam/batch {batch_meta['min_families_per_batch']}-{batch_meta['max_families_per_batch']} | "
-                  f"max {batch_meta['max_batch_clades']:,.0f} clades (C_max={batch_meta['C_max']})", flush=True)
+            print(f"      [auto-batch] try {attempt+1}/{args.mem_retries}: {model_src}  "
+                  f"free={_gib(free_bytes):.1f}GiB target~{_MEM_TARGET_FRAC:.0%} "
+                  f"(budget={_gib(budget_bytes):.1f}GiB -> {clade_budget:,} clades/batch) -> "
+                  f"{batch_meta['n_batches']} batches | fam/batch "
+                  f"{batch_meta['families_per_batch'][0]}-{batch_meta['families_per_batch'][1]} | "
+                  f"max batch {batch_meta['max_batch_clades']:,}C -> pred "
+                  f"{_gib(batch_meta['max_batch_clades'] * bytes_per_clade):.1f}GiB transient", flush=True)
             try:
                 wlb = [_build_wave_layout([families[i] for i in idxs], device, dtype)
                        for idxs in batch_groups]
@@ -262,13 +264,13 @@ def main(argv=None) -> int:
             except torch.cuda.OutOfMemoryError as e:
                 wlb = None
                 torch.cuda.empty_cache()
-                nb = clade_budget * 0.7          # gentle back-off (~30%); 0.7^4 still covers a 4x over-estimate
-                print(f"      [auto-batch] OOM at clade_budget={clade_budget:,.0f} -> shrink to "
-                      f"{nb:,.0f} & retry ({str(e).splitlines()[0][:90]})", flush=True)
-                clade_budget = nb; K_src = "post-OOM shrink"
+                nb = budget_bytes * 0.7
+                print(f"      [auto-batch] OOM at budget={_gib(budget_bytes):.1f}GiB -> shrink to "
+                      f"{_gib(nb):.1f}GiB & retry ({str(e).splitlines()[0][:80]})", flush=True)
+                budget_bytes = nb; model_src += " [post-OOM shrink]"
         if result is None:
             raise SystemExit(f"auto-batch: still OOM after {args.mem_retries} shrinks "
-                             f"(clade_budget down to {clade_budget:,.0f}) -- GPU too small?")
+                             f"(budget down to {_gib(budget_bytes):.1f} GiB) -- GPU too small?")
     else:
         family_batch_size = fbs_raw
         print(f"      [batch] explicit --family-batch-size={family_batch_size}"
@@ -284,39 +286,31 @@ def main(argv=None) -> int:
     print(f"\n  DONE  mode={args.mode}  root={args.root}  families={len(families)}  "
           f"time={elapsed:.1f}s  NLL(log2)={nll:.4f}", flush=True)
 
-    # ---- Memory calibration: measure the real per-clade cost, cache it -------------
-    # peak = resident (fixed) + transient (scales with the batch's ΣC). bytes_per_clade
-    # = transient / max_batch_clades; K = bytes_per_clade/(S*elt) is the algorithm's
-    # live-buffer count. Cache K per (mode,dtype,pibar) so the NEXT run of this config
-    # sizes the first batch right -- "best batch after the first run".
-    peak_batch_clades = (batch_meta["max_batch_clades"] if batch_meta is not None
-                         else (total_C if family_batch_size == 0 else None))
+    # ---- Memory calibration: back out bytes-per-clade from the realized peak and the
+    # peak batch's ACTUAL clade count, and cache the MAX vs the prior value (conservative
+    # -- never under-predict). transient = peak - resident is what scaled with the batch's
+    # ΣC; the bounded per-wave DTS is folded in (slightly over-attributed = safe). --------
     transient_bytes = max(0, peak_bytes - resident)
     calib = None
-    if peak_batch_clades and peak_batch_clades > 0 and transient_bytes > 0:
-        bytes_per_clade = transient_bytes / peak_batch_clades
-        K = bytes_per_clade / (S * elt)
-        calib = {"resident_gib": _gib(resident), "peak_gib": peak_gb,
-                 "transient_gib": _gib(transient_bytes), "peak_batch_clades": peak_batch_clades,
-                 "bytes_per_clade": bytes_per_clade, "K": K}
+    if batch_meta is not None and transient_bytes > 0:
+        mbc = batch_meta["max_batch_clades"]
+        obs_bpc = transient_bytes / max(1, mbc)
         print(f"  [mem] resident={_gib(resident):.2f}GiB peak={peak_gb:.2f}GiB "
-              f"transient={_gib(transient_bytes):.2f}GiB over {peak_batch_clades:,.0f}-clade peak batch", flush=True)
-        print(f"  [mem-calib] bytes/clade={bytes_per_clade:,.0f}  K={K:.2f} live [.,S] buffers (S={S}, elt={elt})",
-              flush=True)
-        # Persist K for this config -- but only from the self-calibrating path, and only
-        # if we filled a healthy fraction of the budget (a tiny/OOM-shrunk batch would
-        # under-measure the peak and cache too-optimistic a K).
-        if fbs_raw == "auto" and mem_factor_val is None and batch_meta is not None \
-                and peak_gb > 0.30 * _gib(free_bytes):
-            _save_calib_K(calib_key, K, {"S": S, "dtype": args.dtype,
-                                         "measured_peak_gib": round(peak_gb, 2),
-                                         "measured_on_families": len(families)})
-        else:
-            print(f"  [mem-calib] (not caching K: manual/partial run — measured only "
-                  f"{peak_gb:.1f} GiB of {_gib(free_bytes):.0f})", flush=True)
+              f"transient={_gib(transient_bytes):.2f}GiB over max batch ({mbc:,}C) "
+              f"-> {obs_bpc:,.0f} B/clade (used {bytes_per_clade:,.0f})", flush=True)
+        calib = {"peak_gib": peak_gb, "resident_gib": _gib(resident),
+                 "transient_gib": _gib(transient_bytes), "max_batch_clades": mbc,
+                 "observed_bytes_per_clade": round(obs_bpc)}
+        # Only fold self-calibrating (auto, non-manual) runs into the cache.
+        if fbs_raw == "auto" and mem_factor_val is None:
+            new_bpc = max(bytes_per_clade, obs_bpc)            # monotone max = conservative
+            _save_calib(calib_key, {"bytes_per_clade": round(new_bpc),
+                                    "resident_gib": round(_gib(resident), 2),
+                                    "S": S, "elt": elt})
+            print(f"  [mem-calib] bytes_per_clade {bytes_per_clade:,.0f} -> {new_bpc:,.0f} "
+                  f"(max of prior and observed)", flush=True)
     else:
-        print(f"  [mem] realized peak = {peak_gb:.2f} GiB (resident {_gib(resident):.2f} GiB; "
-              f"bytes/clade not derivable for this batching mode)", flush=True)
+        print(f"  [mem] realized peak = {peak_gb:.2f} GiB (resident {_gib(resident):.2f} GiB)", flush=True)
 
     out = Path(args.out); out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w") as fh:
@@ -334,7 +328,7 @@ def main(argv=None) -> int:
         "n_families_kept": len(families), "n_families_considered": stats["n_considered"],
         "fraction_missing_used": fm_used, "fm_mode": args.fm_mode,
         "family_batch_size_arg": str(args.family_batch_size),
-        "batching": ("clade_budget" if batch_meta is not None
+        "batching": ("clades_linear" if batch_meta is not None
                      else ("all_at_once" if family_batch_size == 0 else "fixed_count")),
         "family_batch_size_used": family_batch_size,
         "batch_plan": batch_meta,

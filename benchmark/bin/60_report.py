@@ -18,25 +18,6 @@ RESULTS = Path(sys.argv[1] if len(sys.argv) > 1 else
                Path(__file__).resolve().parent.parent / "results")
 
 
-def _ruse_peak_mb(ruse_file: str | None) -> float | None:
-    """Peak memory (MB) from a ruse summary or /usr/bin/time -v output."""
-    if not ruse_file:
-        return None
-    p = Path(ruse_file)
-    if not p.exists():
-        # ruse path is cluster-side; try the collected copy alongside timing.
-        return None
-    txt = p.read_text(errors="replace")
-    m = re.search(r"Memory:\s*([0-9.]+)\s*(MB|GB|KB)", txt)  # ruse
-    if m:
-        v = float(m.group(1)); u = m.group(2)
-        return v * (1024 if u == "GB" else 1 if u == "MB" else 1 / 1024)
-    m = re.search(r"Maximum resident set size \(kbytes\):\s*([0-9]+)", txt)  # time -v
-    if m:
-        return int(m.group(1)) / 1024.0
-    return None
-
-
 def _collect(results: Path) -> list[dict]:
     rows = []
     for tj in sorted(results.rglob("timing*.json")):
@@ -48,6 +29,7 @@ def _collect(results: Path) -> list[dict]:
         # n_families: prefer the gpurec sidecar's kept count; else AleRax's.
         n_fam = rec.get("n_families")
         elapsed_tool = None
+        gpu_peak_gib = None
         side = rec.get("rates_sidecar")
         if side:
             sp = (tj.parent / Path(side).name)
@@ -56,11 +38,12 @@ def _collect(results: Path) -> list[dict]:
                     sj = json.loads(sp.read_text())
                     n_fam = sj.get("n_families_kept", n_fam)
                     elapsed_tool = sj.get("elapsed_s")
+                    gpu_peak_gib = sj.get("peak_gib")   # true GPU peak (torch max_memory_allocated)
                 except Exception:  # noqa: BLE001
                     pass
-        # ruse summary collected next to timing.json (same out dir)
-        ruse_local = tj.parent / "ruse.txt"
-        peak_mb = _ruse_peak_mb(str(ruse_local))
+        # NOTE: we deliberately do NOT report ruse's "Memory" here -- it's host RSS,
+        # not GPU memory (and for AleRax it's just the MPI launcher). The meaningful
+        # figure is gpurec's GPU peak from its sidecar; AleRax (CPU/MPI) has none.
         wall = rec.get("wall_seconds")
         # Pairing tag from the output dir name: <tool>_<mode>_<root>_<phase>_<N>
         # -> pair gpurec vs alerax on the shared <...root_phase_N> suffix.
@@ -75,7 +58,7 @@ def _collect(results: Path) -> list[dict]:
             "n_families": n_fam,
             "wall_s": wall,
             "tool_elapsed_s": elapsed_tool,
-            "peak_mem_mb": round(peak_mb, 1) if peak_mb else None,
+            "peak_gpu_gib": round(gpu_peak_gib, 1) if gpu_peak_gib else None,
             "ms_per_family": round(1000.0 * wall / n_fam, 1)
                               if (wall and n_fam) else None,
             "job_id": rec.get("job_id"),
@@ -95,7 +78,7 @@ def main() -> int:
         return 1
 
     cols = ["tag", "tool", "cluster", "mode", "root", "n_families", "wall_s",
-            "tool_elapsed_s", "peak_mem_mb", "ms_per_family", "job_id", "source"]
+            "tool_elapsed_s", "peak_gpu_gib", "ms_per_family", "job_id", "source"]
     csv_path = RESULTS / "comparison.csv"
     with open(csv_path, "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=cols)
@@ -105,15 +88,18 @@ def main() -> int:
     # Markdown table, sorted by n_families then tool.
     rows.sort(key=lambda r: (r["n_families"] or 0, r["tool"]))
     md = ["# gpurec vs AleRax -- runtime comparison", "",
-          "Same Williams 2017 .ale families, same rooted species tree "
-          f"(`{rows[0]['root'] or '?'}`), DTL model. AleRax = Deigo CPU/MPI; "
-          "gpurec = Saion A100. `wall_s` is the ruse/srun wall time; "
-          "`tool_elapsed_s` is gpurec's own optimize-loop timer.", "",
-          "| tool | cluster | mode | families | wall (s) | tool elapsed (s) | peak mem (MB) | ms/family |",
-          "|------|---------|------|----------|----------|------------------|---------------|-----------|"]
+          "Same .ale gene families, same rooted species tree, same DTL model. "
+          "AleRax = Deigo CPU/MPI; gpurec = Saion A100. `wall_s` is the ruse/srun "
+          "wall time; `tool_elapsed_s` is gpurec's own optimize-loop timer. "
+          "`GPU peak` is gpurec's `torch.cuda.max_memory_allocated` (from its rate "
+          "sidecar); AleRax is CPU/MPI so it has no GPU-memory figure (shown `--`).", "",
+          "| tool | cluster | mode | families | wall (s) | tool elapsed (s) | GPU peak (GiB) | ms/family |",
+          "|------|---------|------|----------|----------|------------------|----------------|-----------|"]
+    _d = lambda v: "--" if v is None else v
     for r in rows:
-        md.append("| {tool} | {cluster} | {mode} | {n_families} | {wall_s} | "
-                  "{tool_elapsed_s} | {peak_mem_mb} | {ms_per_family} |".format(**r))
+        md.append("| {} | {} | {} | {} | {} | {} | {} | {} |".format(
+            r["tool"], r["cluster"], r["mode"], _d(r["n_families"]), _d(r["wall_s"]),
+            _d(r["tool_elapsed_s"]), _d(r["peak_gpu_gib"]), _d(r["ms_per_family"])))
 
     # Speedup lines: pair gpurec vs alerax on the shared run tag (same root +
     # phase + requested N), robust to gpurec's <4-species family drops.
